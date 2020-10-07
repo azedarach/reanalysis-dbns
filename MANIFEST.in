@@ -1,0 +1,8 @@
+include README.md
+include src/reanalysis_dbns/indices/*.nc
+include src/reanalysis_dbns/indices/*.cpg
+include src/reanalysis_dbns/indices/*.dbf
+include src/reanalysis_dbns/indices/*.prj
+include src/reanalysis_dbns/indices/*.shp
+include src/reanalysis_dbns/indices/*.shx
+
