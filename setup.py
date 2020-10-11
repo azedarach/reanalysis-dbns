@@ -9,6 +9,8 @@ install_requires = [
     'netCDF4',
     'numpy',
     'pandas',
+    'patsy',
+    'pystan',
     'regionmask',
     'scikit-learn',
     'scipy',
