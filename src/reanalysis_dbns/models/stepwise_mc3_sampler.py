@@ -271,7 +271,7 @@ def _stepwise_mc3(initial_k, logp, *logp_args, data=None, n_iter=1000,
         {'k': k[::thin], 'lp__': lp[::thin]})
 
     args = {'random_state': random_state, 'allow_exchanges': allow_exchanges,
-            'n_iter': n_iter, 'thin': thin}
+            'n_iter': n_iter, 'thin': thin, 'max_nonzero': max_nonzero}
 
     results = {'chains': chains,
                'args': args,
@@ -500,6 +500,7 @@ def sample_stepwise_mc3(initial_k, logp, *logp_args, data=None,
            'thin': thin,
            'n_save': [n_save] * n_chains,
            'warmup2': [warmup2] * n_chains,
+           'max_nonzero': max_nonzero,
            'permutation': perm_lst,
            'random_seeds': random_seeds}
 

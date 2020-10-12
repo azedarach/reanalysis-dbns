@@ -128,14 +128,14 @@ def test_stepwise_bayes_regression_stepwise_mc3_single_predictor():
         'y ~ x', data=data, n_chains=n_chains, n_iter=n_iter,
         thin=thin, n_jobs=n_jobs, random_state=random_state)
 
-    n_warmup = fit['warmup2'][0]
-    n_kept = fit['n_save'][0] - n_warmup
+    n_warmup = fit.warmup2[0]
+    n_kept = fit.n_save[0] - n_warmup
 
     indicator_samples = np.empty((n_chains * n_kept,))
 
     for i in range(n_chains):
         indicator_samples[i * n_kept:(i + 1) * n_kept] = \
-            fit['samples'][i]['chains']['i_x'][-n_kept:]
+            fit.samples[i]['chains']['i_x'][-n_kept:]
 
     model_1_log_evidence = \
         rdm.bayes_regression_normal_gamma_log_marginal_likelihood(
@@ -151,6 +151,11 @@ def test_stepwise_bayes_regression_stepwise_mc3_single_predictor():
     p_model_2 = np.exp(log_bayes_factor) / (1.0 + np.exp(log_bayes_factor))
 
     assert np.abs(p_model_2 - np.mean(indicator_samples)) < 0.01
+
+    model_summary = fit.model_summary(inc_warmup=False)
+
+    assert np.abs(model_summary['p'][1] - p_model_2) < 0.01
+    assert np.abs(np.sum(model_summary['p']) - 1.0) < 0.001
 
 
 def test_stepwise_bayes_regression_stepwise_mc3_two_predictors():
@@ -188,17 +193,17 @@ def test_stepwise_bayes_regression_stepwise_mc3_two_predictors():
         thin=thin, n_jobs=n_jobs, random_state=random_state,
         max_terms=1)
 
-    n_warmup = fit['warmup2'][0]
-    n_kept = fit['n_save'][0] - n_warmup
+    n_warmup = fit.warmup2[0]
+    n_kept = fit.n_save[0] - n_warmup
 
     indicator_one_samples = np.empty((n_chains * n_kept,))
     indicator_two_samples = np.empty((n_chains * n_kept,))
 
     for i in range(n_chains):
         indicator_one_samples[i * n_kept:(i + 1) * n_kept] = \
-            fit['samples'][i]['chains']['i_x1'][-n_kept:]
+            fit.samples[i]['chains']['i_x1'][-n_kept:]
         indicator_two_samples[i * n_kept:(i + 1) * n_kept] = \
-            fit['samples'][i]['chains']['i_x2'][-n_kept:]
+            fit.samples[i]['chains']['i_x2'][-n_kept:]
 
     model_1_log_evidence = \
         rdm.bayes_regression_normal_gamma_log_marginal_likelihood(
@@ -227,3 +232,19 @@ def test_stepwise_bayes_regression_stepwise_mc3_two_predictors():
                   np.mean(indicator_one_samples)) < 0.01
     assert np.abs(np.exp(model_3_log_post) -
                   np.mean(indicator_two_samples)) < 0.01
+
+    model_summary = fit.model_summary(inc_warmup=False, include_ci=True)
+
+    assert np.abs(model_summary['p'][1] - np.exp(model_3_log_post)) < 0.01
+    assert np.abs(model_summary['p'][2] - np.exp(model_2_log_post)) < 0.01
+    assert np.abs(np.sum(model_summary['p']) - 1.0) < 0.001
+
+    indicators_summary = fit.indicators_summary()
+
+    assert (indicators_summary['mean'].where(
+        indicators_summary['par_name'] == 'i_x1').dropna().item() ==
+        np.mean(indicator_one_samples))
+
+    assert (indicators_summary['mean'].where(
+        indicators_summary['par_name'] == 'i_x2').dropna().item() ==
+        np.mean(indicator_two_samples))

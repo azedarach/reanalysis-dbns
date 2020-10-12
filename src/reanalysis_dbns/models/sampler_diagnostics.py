@@ -592,6 +592,8 @@ def _sample_stationary_distributions(k, model_indicators=None, sparse=False,
 
     if epsilon is None:
         mask = np.sum(n, axis=1) == 0
+        if sparse:
+            mask = np.ravel(mask)
         epsilon = np.full((n_models,), 1.0 / n_observed_models)
         epsilon[mask] = min_epsilon
     elif np.isscalar(epsilon):
@@ -599,7 +601,10 @@ def _sample_stationary_distributions(k, model_indicators=None, sparse=False,
 
     P = np.zeros((n_samples, n_models, n_models))
     for i in range(n_models):
-        alpha = n[i, :] + epsilon[i]
+        if sparse:
+            alpha = n[i, :].toarray().ravel() + epsilon[i]
+        else:
+            alpha = n[i, :] + epsilon[i]
         P[:, i, :] = ss.gamma.rvs(alpha, size=(n_samples, n_models),
                                   random_state=rng)
         row_sums = np.sum(P[:, i, :], axis=1)
@@ -629,7 +634,70 @@ def estimate_stationary_distribution(k, model_indicators=None, sparse=False,
                                      min_epsilon=1e-10,
                                      tolerance=1e-6, fit_kwargs=None,
                                      random_state=None):
-    """Calculate summary of estimated stationary distribution for models."""
+    """Calculate summary of estimated stationary distribution for models.
+
+    Parameters
+    ----------
+    k : array-like, shape (n_chains, n_iter)
+        Array containing the values of the model indicator at each
+        draw of the MCMC output.
+
+    model_indicators : array-like, shape (n_models,)
+        If given, an array or list of the possible model indicators
+        (potentially including models that were not visited by the
+        chain).
+
+    sparse : bool, default: False
+        If True, use sparse matrices for the model and transition counts.
+
+    epsilon : float, optional
+        If given, the value of the prior sample size parameter used in
+        the Dirichlet prior for the transition matrix.
+
+    n_samples : int, default: 100
+        Number of draws from the estimated posterior distribution.
+
+    min_epsilon : float, default: 1e-10
+        Minimum value of the Dirichlet prior parameter.
+
+    tolerance : float, default: 1e-6
+        Tolerance used for determining if an eigenvalue has unit
+        magnitude.
+
+    fit_kwargs : dict
+        Keyword arguments to pass when fitting the Dirichlet distribution.
+
+    random_state : integer, RandomState or None
+        If an integer, random_state is the seed used by the
+        random number generator. If a RandomState instance,
+        random_state is the random number generator. If None,
+        the random number generator is the RandomState instance
+        used by `np.random`.
+
+    Returns
+    -------
+    diagnostics : dict
+        Dict containing the results of fitting a Markov model
+        to the sequence of transitions between models, with entries:
+
+        - 'pi': the sampled stationary distributions of the
+           fitted Markov chain
+
+        - 'ess': the effective sample size
+
+        - 'n_models': the number of possible models
+
+        - 'n_observed_models': the number of models visited by the chain
+
+        - 'epsilon': the value of the parameter used for the Dirichlet prior
+
+    References
+    ----------
+    Heck, D. W., Overstall, A. M., Gronau, Q. F., and Wagenmakers, E.,
+    "Quantifying uncertainty in transdimensional Markov chain Monte Carlo
+    using discrete Markov models", Statistics and Computing 29,
+    631 - 643 (2019), doi:10.1007/s11222-018-9828-0
+    """
 
     rng = check_random_state(random_state)
 

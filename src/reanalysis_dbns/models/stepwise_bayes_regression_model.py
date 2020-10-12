@@ -6,10 +6,14 @@ Provides routines for fitting stepwise Bayes regression model.
 
 from __future__ import absolute_import, division
 
+import collections
+from copy import deepcopy
+import itertools
 import warnings
 
 import arviz as az
 import numpy as np
+import pandas as pd
 import patsy
 import scipy.linalg as sl
 import scipy.special as sp
@@ -18,7 +22,9 @@ import reanalysis_dbns.utils as rdu
 
 from sklearn.utils import check_random_state
 
-from .sampler_helpers import write_stepwise_mc3_samples
+from .sampler_diagnostics import estimate_stationary_distribution
+from .sampler_helpers import (get_sampled_parameter_dimensions,
+                              write_stepwise_mc3_samples)
 from .stepwise_mc3_sampler import sample_stepwise_mc3
 
 
@@ -149,6 +155,44 @@ def _default_indicator_name(p):
     return 'i_{}'.format(p)
 
 
+def _percentile_string(q):
+    """Format percentile."""
+    if 0 <= q <= 1.0:
+        q = 100.0 * q
+    return '{:3.1f}%'.format(q)
+
+
+def _get_sample_summary_statistics(var_values, probs=None):
+    """Get sample summary statistics."""
+
+    n_vars = len(var_values)
+
+    if probs is None:
+        probs = [0.025, 0.25, 0.5, 0.75, 0.975]
+
+    col_names = ['par_name', 'mean', 'sd']
+    for q in probs:
+        col_names += [_percentile_string(q)]
+
+    sample_stats = {'par_name': []}
+    for n in col_names[1:]:
+        sample_stats[n] = np.empty((n_vars,), dtype=float)
+
+    for i, p in enumerate(var_values):
+        sample_stats['par_name'].append(p)
+        sample_stats['mean'][i] = np.mean(var_values[p])
+        sample_stats['sd'][i] = np.std(var_values[p])
+
+        for q in probs:
+            sample_stats[_percentile_string(q)][i] = np.quantile(
+                var_values[p], q)
+
+    data_vars = collections.OrderedDict(
+        {c: sample_stats[c] for c in col_names})
+
+    return pd.DataFrame(data_vars)
+
+
 def _add_named_indicator_variables_to_fit(fit, term_names):
     """Add individual named indicator variables.
 
@@ -157,7 +201,7 @@ def _add_named_indicator_variables_to_fit(fit, term_names):
     fit : dict
         Dictionary containing the results of fitting the model.
 
-    term:names : list
+    term_names : list
         List of term names for each term corresponding to an
         entry in the indicator vector k.
 
@@ -187,6 +231,372 @@ def _add_named_indicator_variables_to_fit(fit, term_names):
     return fit
 
 
+class StepwiseBayesRegressionMC3Results():
+    """Wrapper class for results of MC3 sampling.
+
+    Parameters
+    ----------
+    fit : dict
+        Fit result returned from calling sample_stepwise_mc3.
+
+    random_state : integer, RandomState or None
+        If an integer, random_state is the seed used by the
+        random number generator. If a RandomState instance,
+        random_state is the random number generator. If None,
+        the random number generator is the RandomState instance
+        used by `np.random`.
+
+    Attributes
+    ----------
+    samples : list
+        Samples produced by MC3 sampling.
+
+    n_chains : int
+        Number of chains used for sampling.
+
+    n_iter : int
+        Number of samples per chain.
+
+    warmup : int
+        Number of warmup samples.
+
+    thin : int
+        Stride used for thinning samples.
+
+    n_save : list
+        Number of saved samples in each chain.
+
+    warmup2 : int
+        Number of warmup samples after thinning in each chain.
+
+    permutation : list
+        List of permutations for individual chains.
+
+    random_seeds : list
+        Random seeds used for sampling.
+    """
+    def __init__(self, fit, random_state=None):
+
+        self.samples = deepcopy(fit['samples'])
+        self.n_chains = fit['n_chains']
+        self.n_iter = fit['n_iter']
+        self.warmup = fit['warmup']
+        self.thin = fit['thin']
+        self.n_save = deepcopy(fit['n_save'])
+        self.warmup2 = deepcopy(fit['warmup2'])
+        self.permutation = deepcopy(fit['permutation'])
+        self.random_seeds = deepcopy(fit['random_seeds'])
+        self.max_nonzero = fit['max_nonzero']
+        self.random_state = random_state
+
+        # Options for calculating diagnostics.
+        self.sparse = True
+        self.min_epsilon = 1e-10
+        self.tolerance = 1e-6
+        self.fit_kwargs = None
+
+        # Name of the indicator variable in sampling output.
+        self._ind_var = 'k'
+
+    def _unique_models(self, inc_warmup=False):
+        """Get list of unique models."""
+
+        if self.samples[0]['chains'][self._ind_var].ndim == 1:
+            n_indicators = 1
+        else:
+            n_indicators = self.samples[0]['chains'][self._ind_var].shape[1]
+
+        n_kept = []
+        for i in range(self.n_chains):
+            if inc_warmup:
+                n_kept.append(self.n_save[i])
+            else:
+                n_kept.append(self.n_save[i] - self.warmup2[i])
+
+        n_total = sum(n_kept)
+
+        k = np.empty((n_total, n_indicators))
+        pos = 0
+        for i in range(self.n_chains):
+            chain_k = self.samples[i]['chains'][self._ind_var]
+            if chain_k.ndim == 1:
+                chain_k = chain_k[:, np.newaxis]
+            k[pos:pos + n_kept[i]] = chain_k[-n_kept[i]:]
+            pos += n_kept[i]
+
+        return np.unique(k, axis=0)
+
+    def _count_possible_models(self):
+        """Count the number of possible models."""
+
+        if self.samples[0]['chains'][self._ind_var].ndim == 1:
+            n_indicators = 1
+        else:
+            n_indicators = self.samples[0]['chains'][self._ind_var].shape[1]
+
+        if self.max_nonzero is None:
+            max_nonzero = n_indicators
+
+        return sum([sp.comb(n_indicators, i)
+                    for i in range(max_nonzero + 1)])
+
+    def _get_model_lookup(self, inc_warmup=False):
+        """Get lookup table for model labels."""
+
+        unique_k = self._unique_models(inc_warmup=inc_warmup)
+
+        return {tuple(ki): '{:d}'.format(i)
+                for i, ki in enumerate(unique_k)}
+
+    def _get_model_indicators(self, inc_warmup=False,
+                              only_sampled_models=True):
+        """Get indicator variables for individual models."""
+
+        model_lookup = self._get_model_lookup(inc_warmup=inc_warmup)
+
+        if inc_warmup:
+            n_samples = self.n_save[0]
+        else:
+            n_samples = self.n_save[0] - self.warmup2[0]
+
+        z = np.empty((self.n_chains, n_samples), dtype=str)
+
+        for i in range(self.n_chains):
+
+            if inc_warmup:
+                chain_k = self.samples[i]['chains'][self._ind_var]
+            else:
+                n_kept = self.n_save[i] - self.warmup2[i]
+                chain_k = self.samples[i]['chains'][self._ind_var][-n_kept:]
+
+            for t in range(n_samples):
+                z[i, t] = model_lookup[tuple(chain_k[t])]
+
+        model_indicators = [model_lookup[i] for i in model_lookup]
+        if not only_sampled_models:
+            n_observed_models = len(model_indicators)
+            n_possible_models = self._count_possible_models()
+            model_indicators += ['{:d}'.format(i)
+                                 for i in range(n_observed_models,
+                                                n_possible_models)]
+
+        return z, model_indicators
+
+    def diagnostics(self, n_samples=100, epsilon=None, inc_warmup=False,
+                    only_sampled_models=True):
+
+        z, model_indicators = self._get_model_indicators(
+            inc_warmup=inc_warmup, only_sampled_models=only_sampled_models)
+
+        return estimate_stationary_distribution(
+            z, model_indicators=model_indicators, sparse=self.sparse,
+            epsilon=epsilon, n_samples=n_samples,
+            min_epsilon=self.min_epsilon, tolerance=self.tolerance,
+            fit_kwargs=self.fit_kwargs, random_state=self.random_state)
+
+    def posterior_mode(self, inc_warmup=False):
+        """Get posterior mode for sampled structures."""
+
+        post_mode_lp = -np.inf
+        post_mode = None
+        for i in range(self.n_chains):
+
+            chain = self.samples[i]['chains']
+
+            if inc_warmup:
+                chain_log_post = chain['lp__']
+                chain_mode_ind = np.argmax(chain_log_post)
+            else:
+                n_kept = self.n_save[i] - self.warmup2[i]
+                chain_log_post = chain['lp__'][-n_kept:]
+                chain_mode_ind = n_kept + np.argmax(chain_log_post)
+
+            chain_mode = {p: chain[p][chain_mode_ind] for p in chain}
+            chain_mode_lp = chain['lp__'][chain_mode_ind]
+
+            if chain_mode_lp > post_mode_lp:
+                post_mode_lp = chain_mode_lp
+                post_mode = chain_mode
+
+        return post_mode, post_mode_lp
+
+    def _get_nonindicator_parameters(self):
+        """Get names of all parameters other than indicators vector."""
+        par_names = []
+        for i in range(self.n_chains):
+
+            chain = self.samples[i]['chains']
+            chain_pars = [p for p in chain if p != self._ind_var]
+
+            for p in chain_pars:
+                if p not in par_names:
+                    par_names.append(p)
+
+        return par_names
+
+    def indicators_summary(self, probs=None, inc_warmup=False):
+        """Return summary of sampled indicator variables."""
+
+        # Determine variables to show in output and number of
+        # samples for each.
+        par_names = self._get_nonindicator_parameters()
+
+        n_kept = []
+        for i in range(self.n_chains):
+            if inc_warmup:
+                n_kept.append(self.n_save[i])
+            else:
+                n_kept.append(self.n_save[i] - self.warmup2[i])
+
+        n_samples = sum(n_kept)
+
+        par_samples = {}
+        for p in par_names:
+            par_dims = get_sampled_parameter_dimensions(
+                self.samples[0]['chains'], p)
+
+            par_data = np.empty((n_samples,) + par_dims)
+
+            pos = 0
+            for i in range(self.n_chains):
+                par_data[pos:pos + n_kept[i]] = \
+                    self.samples[i]['chains'][p][-n_kept[i]:]
+                pos += n_kept[i]
+
+            if par_dims:
+                par_data = np.moveaxis(par_data, 0, -1)
+                # Flatten samples.
+                indices = itertools.product(*[range(d) for d in par_dims])
+                for idx in indices:
+                    idx_str = ''.join(['{:d}'.format(d) for d in idx])
+                    flat_par_name = '{}_{}'.format(p, idx_str)
+                    par_samples[flat_par_name] = par_data[idx]
+            else:
+                par_samples[p] = par_data
+
+        # Evaluate summary statistics for sample.
+        return _get_sample_summary_statistics(par_samples, probs=probs)
+
+    def _get_model_indicator_arrays(self, inc_warmup=False):
+        """Get values of indicator variables in each model."""
+
+        if self.samples[0]['chains'][self._ind_var].ndim == 1:
+            n_indicators = 1
+        else:
+            n_indicators = self.samples[0]['chains'][self._ind_var].shape[1]
+
+        model_lookup = self._get_model_lookup(inc_warmup=inc_warmup)
+        indicator_lookup = {model_lookup[k]: k for k in model_lookup}
+
+        model_names = np.array(list(indicator_lookup.keys()))
+        n_observed_models = len(model_names)
+
+        indicator_vals = {}
+        for i in range(n_indicators):
+            ki_vals = np.zeros((n_observed_models,), dtype=int)
+            for j, m in enumerate(model_names):
+                ki_vals[j] = indicator_lookup[m][i]
+            indicator_vals['k{:d}'.format(i)] = ki_vals
+
+        return indicator_vals
+
+    def _calculate_model_posterior_probabilities(self, inc_warmup=False):
+        """Calculate posterior probability for each model."""
+
+        model_lookup = self._get_model_lookup(inc_warmup=inc_warmup)
+        indicator_lookup = {model_lookup[k]: k for k in model_lookup}
+
+        model_names = np.array(list(indicator_lookup.keys()))
+        n_observed_models = len(model_names)
+
+        model_counts = np.zeros((n_observed_models,), dtype=int)
+
+        n_samples = 0
+        for j in range(self.n_chains):
+
+            if inc_warmup:
+                chain_k = self.samples[j]['chains'][self._ind_var]
+            else:
+                n_kept = self.n_save[j] - self.warmup2[j]
+                chain_k = self.samples[j]['chains'][self._ind_var][-n_kept:]
+
+            chain_k = [tuple(k) for k in chain_k]
+            n_samples += len(chain_k)
+
+            for i, m in enumerate(model_names):
+                km = indicator_lookup[m]
+                model_counts[i] += sum([k == km for k in chain_k])
+
+        return model_counts / n_samples
+
+    def _calculate_posterior_probability_ci(self, inc_warmup=False,
+                                            alpha=0.05, **kwargs):
+        """Calculate credible intervals for posterior probabilities."""
+
+        diagnostics = self.diagnostics(inc_warmup=inc_warmup, **kwargs)
+
+        ci_lower = np.quantile(diagnostics['pi'], 0.05 * alpha, axis=0)
+        ci_upper = np.quantile(diagnostics['pi'], 1 - 0.05 * alpha, axis=0)
+
+        return ci_lower, ci_upper
+
+    def model_summary(self, inc_warmup=False, show_indicators=True,
+                      sort_by_probs=True, include_ci=False, alpha=0.05,
+                      **diagnostics_kwargs):
+        """Return summary of sampled models."""
+
+        model_lookup = self._get_model_lookup(inc_warmup=inc_warmup)
+        indicator_lookup = {model_lookup[k]: k for k in model_lookup}
+
+        model_names = np.array(list(indicator_lookup.keys()))
+
+        if show_indicators:
+            indicator_vals = self._get_model_indicator_arrays(
+                inc_warmup=inc_warmup)
+        else:
+            indicator_vals = None
+
+        model_probs = self._calculate_model_posterior_probabilities(
+            inc_warmup=inc_warmup)
+
+        if include_ci:
+            model_probs_lower, model_probs_upper = \
+                self._calculate_posterior_probability_ci(
+                    inc_warmup=inc_warmup, alpha=alpha,
+                    **diagnostics_kwargs)
+        else:
+            model_probs_lower = None
+            model_probs_upper = None
+
+        if sort_by_probs:
+            model_order = np.argsort(-model_probs)
+
+            model_names = model_names[model_order]
+            model_probs = model_probs[model_order]
+
+            if show_indicators:
+                for ki in indicator_vals:
+                    indicator_vals[ki] = indicator_vals[ki][model_order]
+
+            if include_ci:
+                model_probs_lower = model_probs_lower[model_order]
+                model_probs_upper = model_probs_upper[model_order]
+
+        data_vars = collections.OrderedDict({'model': model_names})
+        if show_indicators:
+            for ki in indicator_vals:
+                data_vars[ki] = indicator_vals[ki]
+
+        data_vars['p'] = model_probs
+
+        if include_ci:
+            data_vars[_percentile_string(0.5 * alpha)] = model_probs_lower
+            data_vars[_percentile_string(1 - 0.5 * alpha)] = \
+                model_probs_upper
+
+        return pd.DataFrame(data_vars)
+
+
 class StepwiseBayesRegression():
     """Bayes regression model with conjugate priors and fixed SNR.
 
@@ -209,7 +619,6 @@ class StepwiseBayesRegression():
         self.nu_sq = _check_snr_parameter(nu_sq)
 
         self.allow_exchanges = True
-        self.calculate_diagnostics = True
         self.force_intercept = force_intercept
 
     def _initialize_mc3_random(self, n_terms, n_chains=1, max_terms=None,
@@ -334,10 +743,6 @@ class StepwiseBayesRegression():
             max_nonzero=max_terms, allow_exchanges=self.allow_exchanges,
             random_state=rng)
 
-#        if n_chains > 1 and self.calculate_diagnostics:
-#            _check_stepwise_mc3_convergence_diagnostics(
-#                fit, split=True)
-
         # Generate named indicator variables for convenience.
         fit = _add_named_indicator_variables_to_fit(
             fit, term_names=optional_term_names)
@@ -346,4 +751,4 @@ class StepwiseBayesRegression():
             write_stepwise_mc3_samples(
                 fit, sample_file, data=data)
 
-        return fit
+        return StepwiseBayesRegressionMC3Results(fit)

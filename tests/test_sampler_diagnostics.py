@@ -995,7 +995,8 @@ def test_estimate_stationary_distributions():
     n_samples = 10000
 
     result = rdm.estimate_stationary_distribution(
-        k, n_samples=n_samples, tolerance=1e-3, min_epsilon=1e-10)
+        k, n_samples=n_samples, sparse=True, tolerance=1e-3,
+        min_epsilon=1e-10)
 
     assert result['pi'].shape == (n_samples, 2)
     row_sums = np.sum(result['pi'], axis=1)

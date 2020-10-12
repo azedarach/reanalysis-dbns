@@ -109,6 +109,20 @@ def check_common_sampler_settings(n_chains, n_iter, warmup=None, n_jobs=None):
     return n_chains, n_iter, warmup, n_jobs
 
 
+def get_sampled_parameter_dimensions(chain, par):
+    """Get dimensions of parameter in fit output."""
+
+    if par not in chain:
+        raise ValueError(
+            "Could not find parameter '%r' in fit output" % par)
+
+    if chain[par].ndim == 1:
+        # Output has shape (n_iter,), i.e., parameter is a scalar.
+        return ()
+
+    return chain[par].shape[1:]
+
+
 def get_log_likelihood_data(fit):
     """Get log-likelihood group from fit for writing to file."""
 
