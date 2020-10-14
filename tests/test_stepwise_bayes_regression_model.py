@@ -31,6 +31,281 @@ def test_uniform_indicator_set_priors():
     assert np.abs(p - expected) < 1e-12
 
 
+def test_sample_structures_prior():
+    """Test sampling from uniform priors on structures."""
+
+    random_seed = 0
+    random_state = check_random_state(random_seed)
+
+    a_tau = 0.5
+    b_tau = 2.3
+    nu_sq = 0.9
+    model = rdm.StepwiseBayesRegression(a_tau=a_tau, b_tau=b_tau, nu_sq=nu_sq)
+
+    n_chains = 4
+    n_iter = 2000
+    prior_samples = model.sample_structures_prior(
+        'y ~ x1 + x2', n_chains=n_chains, n_iter=n_iter,
+        random_state=random_state)
+
+    assert len(prior_samples['samples']) == n_chains
+
+    possible_models = [np.array([0, 0]), np.array([1, 0]),
+                       np.array([0, 1]), np.array([1, 1])]
+    n_possible_models = len(possible_models)
+    for i in range(n_chains):
+        chains = prior_samples['samples'][i]['chains']
+
+        sampled_models = np.unique(chains['k'], axis=0)
+        assert len(sampled_models) == n_possible_models
+
+        for k in sampled_models:
+            assert any([np.all(k == ki) for ki in possible_models])
+            k_full = np.tile(k, (n_iter, 1))
+            model_count = np.sum(np.all(chains['k'] == k_full, axis=1))
+            model_prob = model_count / n_iter
+            assert np.abs(model_prob - 1.0 / n_possible_models) < 0.05
+
+    n_samples = 200
+    data = {'y': random_state.uniform(size=(n_samples,)),
+            'x1': random_state.uniform(size=(n_samples,)),
+            'x2': random_state.choice(2, size=(n_samples,))}
+
+    prior_samples = model.sample_structures_prior(
+        'y ~ x1 + x2', data=data, n_chains=n_chains, n_iter=n_iter,
+        random_state=random_state)
+
+    assert len(prior_samples['samples']) == n_chains
+
+    n_possible_models = 4
+    for i in range(n_chains):
+        chains = prior_samples['samples'][i]['chains']
+
+        sampled_models = np.unique(chains['k'], axis=0)
+        assert len(sampled_models) == n_possible_models
+
+        for k in sampled_models:
+            assert any([np.all(k == ki) for ki in possible_models])
+            k_full = np.tile(k, (n_iter, 1))
+            model_count = np.sum(np.all(chains['k'] == k_full, axis=1))
+            model_prob = model_count / n_iter
+            assert np.abs(model_prob - 1.0 / n_possible_models) < 0.05
+
+
+def test_sample_parameter_priors():
+    """Test sampling from parameter priors."""
+
+    random_seed = 0
+    random_state = check_random_state(random_seed)
+
+    n_samples = 200
+    y = random_state.uniform(size=(n_samples,))
+    x = random_state.uniform(size=(n_samples,))
+
+    data = {'y': y, 'x': x}
+
+    a_tau = 1.5
+    b_tau = 5.0
+    nu_sq = 2.3
+    model = rdm.StepwiseBayesRegression(a_tau=a_tau, b_tau=b_tau, nu_sq=nu_sq)
+
+    n_chains = 4
+    n_iter = 20000
+    prior_samples = model.sample_parameter_priors(
+        'y ~ x', data=data, n_chains=n_chains, n_iter=n_iter,
+        random_state=random_state)
+
+    assert len(prior_samples['samples']) == n_chains
+
+    expected_mean_tau_sq = a_tau * b_tau
+    expected_mean_beta = 0.0
+    expected_scale_beta = np.sqrt(nu_sq / (a_tau * b_tau))
+    expected_df_beta = 2.0 * a_tau
+    expected_std_beta = expected_scale_beta * np.sqrt(
+        expected_df_beta / (expected_df_beta - 2.0))
+
+    for i in range(n_chains):
+        chains = prior_samples['samples'][i]['chains']
+        assert np.abs(np.mean(chains['tau_sq']) - expected_mean_tau_sq) < 0.05
+        assert np.abs(np.mean(chains['Intercept']) - expected_mean_beta) < 0.05
+        assert np.abs(np.std(chains['Intercept']) - expected_std_beta) < 0.05
+        assert np.abs(np.mean(chains['x']) - expected_mean_beta) < 0.05
+        assert np.abs(np.std(chains['x']) - expected_std_beta) < 0.05
+
+
+def test_prior_predictive_checks_fixed_model():
+    """Test prior predictive sampling for a single model."""
+
+    random_seed = 0
+    random_state = check_random_state(random_seed)
+
+    n_samples = 30
+    x1 = random_state.uniform(size=n_samples)
+    x2 = random_state.uniform(size=n_samples)**2
+    intcpt = 1.0
+    coef = -2.3
+    scale = 2.3
+    y = random_state.normal(loc=(intcpt + coef * x1),
+                            scale=scale, size=n_samples)
+
+    data = {'y': y, 'x1': x1, 'x2': x2}
+
+    a_tau = 1.5
+    b_tau = 2.1
+    nu_sq = 2.3
+    model = rdm.StepwiseBayesRegression(a_tau=a_tau, b_tau=b_tau, nu_sq=nu_sq)
+
+    df = 2 * a_tau
+
+    expected_mean_tau_sq = a_tau * b_tau
+    expected_mean_beta = 0.0
+    expected_scale_beta = np.sqrt(nu_sq / (a_tau * b_tau))
+    expected_df_beta = 2.0 * a_tau
+    expected_std_beta = expected_scale_beta * np.sqrt(
+        expected_df_beta / (expected_df_beta - 2.0))
+
+    n_chains = 4
+    n_iter = 200000
+    n_jobs = 1
+
+    prior_samples = model.sample_prior_predictive(
+        'y ~ 1', data=data, fixed_model=True,
+        n_chains=n_chains, n_iter=n_iter, n_jobs=n_jobs,
+        random_state=random_state)
+
+    assert len(prior_samples['samples']) == n_chains
+
+    X = np.ones((n_samples, 1))
+    for i in range(n_chains):
+
+        chains = prior_samples['samples'][i]['chains']
+
+        assert 'y' in chains
+        assert 'tau_sq' in chains
+        assert 'lp__' in chains
+
+        assert chains['y'].shape == (n_iter, n_samples)
+        assert chains['tau_sq'].shape == (n_iter,)
+        assert chains['lp__'].shape == (n_iter,)
+
+        assert np.abs(np.mean(chains['tau_sq']) - expected_mean_tau_sq) < 0.1
+        assert np.abs(np.mean(chains['Intercept']) - expected_mean_beta) < 0.1
+        assert np.abs(np.std(chains['Intercept']) - expected_std_beta) < 0.1
+
+        assert np.all(np.abs(np.mean(chains['y'], axis=0)) < 0.1)
+
+        yc = chains['y'] - np.mean(chains['y'], axis=0, keepdims=True)
+        sample_cov = np.dot(yc.T, yc) / (n_iter - 1)
+        expected_cov = ((np.eye(n_samples) + nu_sq * np.dot(X, X.T)) /
+                        (a_tau * b_tau))
+        expected_cov = df * expected_cov / (df - 2)
+
+        assert np.all(
+            np.abs((sample_cov - expected_cov)) < 0.5)
+
+    prior_samples = model.sample_prior_predictive(
+        'y ~ x1', data=data, fixed_model=True,
+        n_chains=n_chains, n_iter=n_iter, n_jobs=n_jobs,
+        random_state=random_state)
+
+    assert len(prior_samples['samples']) == n_chains
+
+    X = np.vstack([np.ones(n_samples), x1]).T
+    for i in range(n_chains):
+
+        chains = prior_samples['samples'][i]['chains']
+
+        assert 'y' in chains
+        assert 'tau_sq' in chains
+        assert 'x1' in chains
+        assert 'lp__' in chains
+
+        assert chains['y'].shape == (n_iter, n_samples)
+        assert chains['tau_sq'].shape == (n_iter,)
+        assert chains['x1'].shape == (n_iter,)
+        assert chains['lp__'].shape == (n_iter,)
+
+        assert np.abs(np.mean(chains['tau_sq']) - expected_mean_tau_sq) < 0.1
+        assert np.abs(np.mean(chains['Intercept']) - expected_mean_beta) < 0.1
+        assert np.abs(np.std(chains['Intercept']) - expected_std_beta) < 0.1
+        assert np.abs(np.mean(chains['x1']) - expected_mean_beta) < 0.1
+        assert np.abs(np.std(chains['x1']) - expected_std_beta) < 0.1
+
+        assert np.all(np.abs(np.mean(chains['y'], axis=0)) < 0.1)
+
+        yc = chains['y'] - np.mean(chains['y'], axis=0, keepdims=True)
+        sample_cov = np.dot(yc.T, yc) / (n_iter - 1)
+        expected_cov = ((np.eye(n_samples) + nu_sq * np.dot(X, X.T)) /
+                        (a_tau * b_tau))
+        expected_cov = df * expected_cov / (df - 2)
+
+        assert np.all(
+            np.abs((sample_cov - expected_cov)) < 0.5)
+
+
+def test_prior_predictive_checks():
+    """Test prior predictive sampling for all models."""
+
+    random_seed = 0
+    random_state = check_random_state(random_seed)
+
+    n_samples = 30
+    x1 = random_state.uniform(size=n_samples)
+    x2 = random_state.uniform(size=n_samples)**2
+    intcpt = 1.0
+    coef = -2.3
+    scale = 2.3
+    y = random_state.normal(loc=(intcpt + coef * x1),
+                            scale=scale, size=n_samples)
+
+    data = {'y': y, 'x1': x1, 'x2': x2}
+
+    a_tau = 1.5
+    b_tau = 2.1
+    nu_sq = 2.3
+    model = rdm.StepwiseBayesRegression(a_tau=a_tau, b_tau=b_tau, nu_sq=nu_sq)
+
+    n_chains = 4
+    n_iter = 2000
+    n_jobs = 1
+    prior_samples = model.sample_prior_predictive(
+        'y ~ x1 + x2', data=data, fixed_model=False,
+        n_chains=n_chains, n_iter=n_iter, n_jobs=n_jobs,
+        random_state=random_state)
+
+    assert len(prior_samples['samples']) == n_chains
+
+    possible_models = [np.array([0, 0]), np.array([1, 0]),
+                       np.array([0, 1]), np.array([1, 1])]
+    n_possible_models = len(possible_models)
+    for i in range(n_chains):
+
+        chains = prior_samples['samples'][i]['chains']
+
+        assert 'y' in chains
+        assert 'k' in chains
+        assert 'i_x1' in chains
+        assert 'i_x2' in chains
+        assert 'lp__' in chains
+
+        assert chains['y'].shape == (n_iter, n_samples)
+        assert chains['k'].shape == (n_iter, 2)
+        assert chains['i_x1'].shape == (n_iter,)
+        assert chains['i_x2'].shape == (n_iter,)
+        assert chains['lp__'].shape == (n_iter,)
+
+        sampled_models = np.unique(chains['k'], axis=0)
+
+        assert len(sampled_models) == n_possible_models
+
+        for k in sampled_models:
+            assert any([np.all(k == ki) for ki in possible_models])
+            k_full = np.tile(k, (n_iter, 1))
+            model_count = np.sum(np.all(chains['k'] == k_full, axis=1))
+            model_prob = model_count / n_iter
+            assert np.abs(model_prob - 1.0 / n_possible_models) < 0.05
+
+
 def test_bayes_regression_log_marginal_likelihood():
     """Test calculation of log marginal likelihood."""
 

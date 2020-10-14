@@ -6,9 +6,11 @@ Provides helper routines for working with sampler output.
 
 from __future__ import absolute_import, division
 
+import collections
 
 import arviz as az
 import numpy as np
+import pandas as pd
 
 import reanalysis_dbns.utils as rdu
 
@@ -121,6 +123,44 @@ def get_sampled_parameter_dimensions(chain, par):
         return ()
 
     return chain[par].shape[1:]
+
+
+def format_percentile(q):
+    """Format percentile as a string."""
+    if 0 <= q <= 1.0:
+        q = 100.0 * q
+    return '{:3.1f}%'.format(q)
+
+
+def get_sample_summary_statistics(var_values, probs=None):
+    """Get sample summary statistics."""
+
+    n_vars = len(var_values)
+
+    if probs is None:
+        probs = [0.025, 0.25, 0.5, 0.75, 0.975]
+
+    col_names = ['par_name', 'mean', 'sd']
+    for q in probs:
+        col_names += [format_percentile(q)]
+
+    sample_stats = {'par_name': []}
+    for n in col_names[1:]:
+        sample_stats[n] = np.empty((n_vars,), dtype=float)
+
+    for i, p in enumerate(var_values):
+        sample_stats['par_name'].append(p)
+        sample_stats['mean'][i] = np.mean(var_values[p])
+        sample_stats['sd'][i] = np.std(var_values[p])
+
+        for q in probs:
+            sample_stats[format_percentile(q)][i] = np.quantile(
+                var_values[p], q)
+
+    data_vars = collections.OrderedDict(
+        {c: sample_stats[c] for c in col_names})
+
+    return pd.DataFrame(data_vars)
 
 
 def get_log_likelihood_data(fit):
