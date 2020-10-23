@@ -7,8 +7,6 @@ Provides routines for fitting stepwise Bayes regression model.
 from __future__ import absolute_import, division
 
 import collections
-from copy import deepcopy
-import itertools
 import warnings
 
 import arviz as az
@@ -24,12 +22,16 @@ import reanalysis_dbns.utils as rdu
 from joblib import Parallel, delayed
 from sklearn.utils import check_random_state
 
-from .sampler_diagnostics import estimate_stationary_distribution
-from .sampler_helpers import (format_percentile,
-                              get_sample_summary_statistics,
-                              get_sampled_parameter_dimensions,
-                              write_stepwise_mc3_samples)
-from .stepwise_mc3_sampler import sample_stepwise_mc3
+from .sampler_diagnostics import (estimate_convergence_rate,
+                                  estimate_stationary_distribution,
+                                  rjmcmc_batch_chisq_convergence,
+                                  rjmcmc_batch_kstest_convergence,
+                                  rjmcmc_chisq_convergence,
+                                  rjmcmc_kstest_convergence)
+from .sampler_helpers import (check_max_nonzero_indicators,
+                              convert_samples_dict_to_inference_data)
+from .stepwise_mc3_sampler import (initialize_stepwise_mc3,
+                                   sample_stepwise_mc3)
 
 
 def _check_gamma_hyperparameters(a_tau, b_tau):
@@ -73,23 +75,6 @@ def _check_design_matrices(y, X):
     return y, X
 
 
-def _check_max_terms(max_terms, n_terms):
-    """Check maximum number of terms is valid."""
-
-    if max_terms is None:
-        max_terms = n_terms
-
-    invalid_max_terms = (not rdu.is_integer(max_terms) or
-                         max_terms < 0 or
-                         max_terms > n_terms)
-    if invalid_max_terms:
-        raise ValueError(
-            'Maximum number of terms must be an integer between 0 and %d '
-            '(got max_terms=%r)' % (n_terms, max_terms))
-
-    return max_terms
-
-
 def _get_optional_terms(term_list, term_names=None, force_intercept=True):
     """Get list of optional terms."""
 
@@ -110,18 +95,99 @@ def _get_optional_terms(term_list, term_names=None, force_intercept=True):
     return optional_terms, optional_term_names
 
 
+def _get_outcome_and_optional_terms(formula_like, data=None,
+                                    force_intercept=True):
+    """Get terms from model description."""
+
+    try:
+        # Try to infer the possible terms from the general case
+        # where pre-formed design matrices or a formula string
+        # may be given.
+        y, X = patsy.dmatrices(formula_like, data=data)
+        y, X = _check_design_matrices(y, X)
+
+        lhs_terms = y.design_info.terms
+        outcome_names = y.design_info.column_names
+        optional_terms, optional_term_names = _get_optional_terms(
+            X.design_info.terms, term_names=X.design_info.term_names,
+            force_intercept=force_intercept)
+
+    except patsy.PatsyError:
+        # If this fails, fall back on trying to construct the
+        # model from a formula string.
+        full_model = patsy.ModelDesc.from_formula(formula_like)
+
+        lhs_terms = full_model.lhs_termlist
+        outcome_names = [t.name() for t in full_model.lhs_termlist]
+        optional_terms, _ = _get_optional_terms(
+            full_model.rhs_termlist, force_intercept=force_intercept)
+        optional_term_names = [t.name() for t in optional_terms]
+
+    return lhs_terms, outcome_names, optional_terms, optional_term_names
+
+
+def _get_model_description(k, lhs_terms=None, optional_terms=None,
+                           force_intercept=True):
+    """Get model description from indicators vector."""
+
+    rhs_terms = []
+    if force_intercept:
+        rhs_terms.append(patsy.INTERCEPT)
+
+    for m, km in enumerate(k):
+        if km == 1:
+            rhs_terms.append(optional_terms[m])
+
+    model_desc = patsy.ModelDesc(lhs_terms, rhs_terms)
+
+    return model_desc
+
+
+def _add_named_indicator_variables_to_fit(fit, term_names):
+    """Add individual named indicator variables.
+
+    Parameters
+    ----------
+    fit : dict
+        Dictionary containing the results of fitting the model.
+
+    term_names : list
+        List of term names for each term corresponding to an
+        entry in the indicator vector k.
+
+    Returns
+    -------
+    fit : dict
+        Fit with named indicator variables added.
+    """
+
+    n_chains = len(fit['samples'])
+
+    for i in range(n_chains):
+
+        k = fit['samples'][i]['chains']['k']
+        n_samples = k.shape[0]
+
+        for t in term_names:
+            ind = rdu.get_default_indicator_name(t)
+            fit['samples'][i]['chains'][ind] = np.empty(
+                (n_samples,), dtype=int)
+
+        for j in range(n_samples):
+            for m, km in enumerate(k[j]):
+                ind = rdu.get_default_indicator_name(term_names[m])
+                fit['samples'][i]['chains'][ind][j] = km
+
+    return fit
+
+
 def log_uniform_indicator_set_prior(k, max_nonzero=None):
     """Evaluate uniform prior on indicator set."""
 
     n_indicators = k.shape[0]
 
-    if max_nonzero is None:
-        max_nonzero = n_indicators
-    else:
-        if not rdu.is_integer(max_nonzero) or max_nonzero < 0:
-            raise ValueError(
-                'Maximum size of indicator set must be a '
-                'non-negative integer')
+    max_nonzero = check_max_nonzero_indicators(
+        max_nonzero, n_indicators=n_indicators)
 
     n_nonzero = np.sum(k > 0)
 
@@ -152,6 +218,29 @@ def _bayes_regression_normal_gamma_covariance_matrices(X, nu_sq):
     return c_inv, sigma_inv
 
 
+def _bayes_regression_normal_gamma_posterior_parameters(y, X, nu_sq, a_tau,
+                                                        b_tau, c_inv=None,
+                                                        sigma_inv=None):
+    """Calculate parameters for posterior distribution."""
+
+    n_samples = X.shape[0]
+
+    if c_inv is None or sigma_inv is None:
+        c_inv, sigma_inv = \
+            _bayes_regression_normal_gamma_covariance_matrices(X, nu_sq)
+
+    cov_term = (1.0 + 0.5 * b_tau * np.dot(y.T, np.dot(sigma_inv, y)))
+
+    mean_beta_post = np.ravel(nu_sq * np.dot(c_inv, np.dot(X.T, y)))
+    # NB, posterior covariance = sigma_beta_post / precision
+    sigma_beta_post = nu_sq * c_inv
+
+    a_tau_post = a_tau + 0.5 * n_samples
+    b_tau_post = b_tau / cov_term
+
+    return a_tau_post, b_tau_post, mean_beta_post, sigma_beta_post
+
+
 def bayes_regression_normal_gamma_log_marginal_likelihood(y, X, nu_sq,
                                                           a_tau, b_tau,
                                                           sigma_inv=None):
@@ -176,13 +265,49 @@ def bayes_regression_normal_gamma_log_marginal_likelihood(y, X, nu_sq,
     return log_marginal_likelihood
 
 
+def bayes_regression_log_model_posterior(k, data=None, max_terms=None,
+                                         a_tau=1.0, b_tau=1.0, nu_sq=1.0,
+                                         formula_like=None,
+                                         lhs_terms=None, optional_terms=None,
+                                         force_intercept=True):
+    """Evaluate (non-normalized) log model posterior probability."""
+
+    lp = log_uniform_indicator_set_prior(k, max_nonzero=max_terms)
+
+    has_terms = lhs_terms is not None and optional_terms is not None
+    if formula_like is None and not has_terms:
+        raise ValueError(
+            'Either a model formula or term lists must be provided')
+
+    if formula_like is not None and not has_terms:
+        y, X = patsy.dmatrices(formula_like, data=data)
+        y, X = _check_design_matrices(y, X)
+
+        lhs_terms = y.design_info.terms
+        optional_terms, _ = _get_optional_terms(
+            X.design_info.terms, term_names=X.design_info.term_names,
+            force_intercept=force_intercept)
+
+    model_desc = _get_model_description(
+        k, lhs_terms=lhs_terms, optional_terms=optional_terms,
+        force_intercept=force_intercept)
+
+    y, X = patsy.dmatrices(model_desc, data=data)
+
+    lp += bayes_regression_normal_gamma_log_marginal_likelihood(
+        y, X, a_tau=a_tau, b_tau=b_tau, nu_sq=nu_sq)
+
+    return lp
+
+
 def _sample_uniform_structures_prior(n_terms, max_terms=None,
                                      size=1, random_state=None):
     """Draw a single sample from a uniform prior on structures."""
 
     rng = check_random_state(random_state)
 
-    max_terms = _check_max_terms(max_terms, n_terms=n_terms)
+    max_terms = check_max_nonzero_indicators(
+        max_terms, n_indicators=n_terms)
 
     k = np.zeros((size, n_terms), dtype=int)
     lp = np.zeros((size,))
@@ -238,454 +363,740 @@ def _sample_parameters_conjugate_priors(n_coefs, a_tau=1.0, b_tau=1.0,
     return beta, tau_sq, lp
 
 
-def _default_indicator_name(p):
-    """Return name of indicator variable for inclusion of term."""
-    return 'i_{}'.format(p)
+def _sample_parameters_posterior(y, X, a_tau=1.0, b_tau=1.0, nu_sq=1.0,
+                                 c_inv=None, sigma_inv=None, size=1,
+                                 random_state=None):
+    """Sample parameters from posterior distribution."""
+
+    rng = check_random_state(random_state)
+
+    a_tau_post, b_tau_post, mean_beta_post, sigma_beta_post = \
+        _bayes_regression_normal_gamma_posterior_parameters(
+            y, X, a_tau=a_tau, b_tau=b_tau, nu_sq=nu_sq,
+            c_inv=c_inv, sigma_inv=sigma_inv)
+
+    tau_sq = ss.gamma.rvs(a_tau_post, scale=b_tau_post,
+                          size=size, random_state=rng)
+
+    flat_tau_sq = np.ravel(np.atleast_1d(tau_sq))
+
+    n_samples = flat_tau_sq.shape[0]
+    n_coef = X.shape[1]
+    beta = np.empty((n_samples, n_coef))
+    lp = np.ravel(ss.gamma.logpdf(flat_tau_sq, a_tau_post,
+                                  scale=b_tau_post))
+
+    for i in range(n_samples):
+        beta[i] = ss.multivariate_normal.rvs(
+            mean=mean_beta_post,
+            cov=(sigma_beta_post / flat_tau_sq[i]),
+            random_state=rng)
+        lp[i] += ss.multivariate_normal.logpdf(
+            beta[i], mean=mean_beta_post,
+            cov=(sigma_beta_post / flat_tau_sq[i]))
+
+    if np.ndim(tau_sq) == 0:
+        beta = beta[0]
+        lp = lp[0]
+    else:
+        beta = np.reshape(beta, tau_sq.shape + (n_coef,))
+        lp = np.reshape(lp, tau_sq.shape)
+
+    return beta, tau_sq, lp
 
 
-def _add_named_indicator_variables_to_fit(fit, term_names):
-    """Add individual named indicator variables.
+def _sample_outcomes(X, beta, tau_sq, random_state=None):
+    """Sample outcomes given parameter values.
 
     Parameters
     ----------
-    fit : dict
-        Dictionary containing the results of fitting the model.
+    X : array-like, shape (n_samples, n_features)
+        Fixed design matrix used for prediction.
 
-    term_names : list
-        List of term names for each term corresponding to an
-        entry in the indicator vector k.
+    beta : array-like, shape (..., n_features)
+        Array of sampled coefficient values.
+
+    tau_sq : array-like
+        Array of sampled precision values.
 
     Returns
     -------
-    fit : dict
-        Fit with named indicator variables added.
+    sampled_outcomes : array, shape (..., n_samples, n_outcomes)
+        Array of sampled outcome values.
+
+    log_likelihood : array
+        Array containing the values of the log-likelihood
+        for each function.
     """
 
+    rng = check_random_state(random_state)
+
+    # Size of sample to generate.
+    size = np.shape(tau_sq)
+
+    n_features = X.shape[1]
+
+    if np.shape(beta) != (size + (n_features,)):
+        raise ValueError(
+            'Sizes of sampled coefficients and precision values '
+            ' are inconsistent '
+            '(got np.shape(tau_sq)=%r but np.shape(beta)=%r)' %
+            (size, np.shape(beta)))
+
+    # Evaluate predicted mean values for each sample,
+    # with shape (..., n_samples, n_outcomes)
+    cond_means = np.matmul(X, beta[..., np.newaxis])
+    cond_scales = np.sqrt(1.0 / tau_sq)
+    cond_scales = np.broadcast_to(cond_scales[..., np.newaxis, np.newaxis],
+                                  cond_means.shape)
+
+    sampled_outcomes = ss.norm.rvs(
+        loc=cond_means, scale=cond_scales,
+        random_state=rng)
+
+    log_likelihood = np.sum(
+        ss.norm.logpdf(
+            sampled_outcomes, loc=cond_means,
+            scale=cond_scales),
+        axis=(-2, -1))
+
+    return sampled_outcomes, log_likelihood
+
+
+def _sample_prior_fixed_model(formula_like, data=None,
+                              a_tau=1.0, b_tau=1.0, nu_sq=1.0,
+                              n_iter=2000,
+                              generate_prior_predictive=False,
+                              random_state=None):
+    """Sample from prior for a fixed model."""
+
+    rng = check_random_state(random_state)
+
+    y, X = patsy.dmatrices(formula_like, data=data)
+    y, X = _check_design_matrices(y, X)
+
+    outcome_names = y.design_info.column_names
+    coef_names = X.design_info.column_names
+    n_coefs = len(coef_names)
+
+    beta, tau_sq, lp = _sample_parameters_conjugate_priors(
+        n_coefs, a_tau=a_tau, b_tau=b_tau, nu_sq=nu_sq,
+        size=n_iter, random_state=rng)
+
+    chains = collections.OrderedDict({'tau_sq': tau_sq})
+    for j, t in enumerate(coef_names):
+        chains[t] = beta[:, j]
+    chains['lp__'] = lp
+
+    outcome_chains = None
+    if generate_prior_predictive:
+        sampled_outcomes, _ = _sample_outcomes(
+            X, beta, tau_sq, random_state=rng)
+
+        outcome_chains = collections.OrderedDict(
+            {n: sampled_outcomes[..., i]
+             for i, n in enumerate(outcome_names)})
+
+    args = {'random_state': random_state, 'n_iter': n_iter}
+
+    results = {'chains': chains,
+               'args': args,
+               'acceptance': 1.0,
+               'accept_stat': np.ones((n_iter,), dtype=float),
+               'mean_lp__': np.mean(chains['lp__'])}
+
+    prior_predictive = None
+    if generate_prior_predictive:
+        prior_predictive = {
+            'chains': outcome_chains,
+            'args': args,
+            'acceptance': 1.0,
+            'accept_stat': np.ones((n_iter,), dtype=float)
+        }
+
+    return results, prior_predictive
+
+
+def _sample_posterior_fixed_model(formula_like, data=None,
+                                  a_tau=1.0, b_tau=1.0, nu_sq=1.0,
+                                  n_iter=2000, thin=1,
+                                  generate_posterior_predictive=False,
+                                  random_state=None):
+    """Sample from posterior for a fixed model."""
+
+    rng = check_random_state(random_state)
+
+    y, X = patsy.dmatrices(formula_like, data=data)
+    y, X = _check_design_matrices(y, X)
+
+    outcome_names = y.design_info.column_names
+    coef_names = X.design_info.column_names
+
+    beta, tau_sq, lp = _sample_parameters_posterior(
+        y, X, a_tau=a_tau, b_tau=b_tau, nu_sq=nu_sq,
+        size=n_iter, random_state=rng)
+
+    chains = collections.OrderedDict({'tau_sq': tau_sq[::thin]})
+    for j, t in enumerate(coef_names):
+        chains[t] = beta[::thin, j]
+    chains['lp__'] = lp[::thin]
+
+    outcome_chains = None
+    if generate_posterior_predictive:
+        sampled_outcomes, _ = _sample_outcomes(
+            X, beta, tau_sq, random_state=rng)
+
+        outcome_chains = collections.OrderedDict(
+            {n: sampled_outcomes[::thin, ..., i]
+             for i, n in enumerate(outcome_names)})
+
+    args = {'random_state': random_state, 'n_iter': n_iter,
+            'thin': thin}
+
+    results = {'chains': chains,
+               'args': args,
+               'acceptance': 1.0,
+               'accept_stat': np.ones((n_iter,), dtype=float),
+               'mean_lp__': np.mean(chains['lp__'])}
+
+    posterior_predictive = None
+    if generate_posterior_predictive:
+        posterior_predictive = {
+            'chains': outcome_chains,
+            'args': args,
+            'acceptance': 1.0,
+            'accept_stat': np.ones((n_iter,), dtype=float)
+        }
+
+    return results, posterior_predictive
+
+
+def _get_structure_samples_posterior_predictive(fit, formula_like, data=None,
+                                                a_tau=1.0, b_tau=1.0,
+                                                nu_sq=1.0,
+                                                force_intercept=True,
+                                                random_state=None):
+    """Get posterior predictive samples corresponding to structure sample."""
+
+    rng = check_random_state(random_state)
+
+    y, X = patsy.dmatrices(formula_like, data=data)
+    y, X = _check_design_matrices(y, X)
+
+    lhs_terms = y.design_info.terms
+    outcome_names = y.design_info.column_names
+    optional_terms, optional_term_names = _get_optional_terms(
+        X.design_info.terms, term_names=X.design_info.term_names,
+        force_intercept=force_intercept)
+
+    n_outcomes = len(outcome_names)
+
+    max_nonzero = fit['max_nonzero']
+    allow_exchanges = fit['samples'][0]['args']['allow_exchanges']
     n_chains = len(fit['samples'])
+    n_iter = fit['n_iter']
+    n_save = fit['n_save']
+    thin = fit['thin']
+
+    random_seeds = rng.choice(1000000 * n_chains,
+                              size=n_chains, replace=False)
+
+    samples = []
+    for i in range(n_chains):
+
+        chain_rng = check_random_state(random_seeds[i])
+        chain_k = fit['samples'][i]['chains']['k']
+
+        sampled_outcomes = None
+        for j in range(n_save[i]):
+
+            model_desc = _get_model_description(
+                chain_k[j], lhs_terms=lhs_terms,
+                optional_terms=optional_terms,
+                force_intercept=force_intercept)
+
+            _, model_sample = _sample_posterior_fixed_model(
+                model_desc, data=data, a_tau=a_tau, b_tau=b_tau, nu_sq=nu_sq,
+                n_iter=1,
+                generate_posterior_predictive=True,
+                random_state=chain_rng)
+
+            if sampled_outcomes is None:
+                n_samples = model_sample['chains'][outcome_names[0]].shape[0]
+                sampled_outcomes = np.zeros((n_save[i], n_samples, n_outcomes))
+
+            for m, n in enumerate(outcome_names):
+                sampled_outcomes[j, ..., m] = model_sample['chains'][n]
+
+        chains = collections.OrderedDict(
+            {n: sampled_outcomes[..., m]
+             for m, n in enumerate(outcome_names)})
+
+        args = {'random_state': random_seeds[i], 'n_iter': fit['n_iter'],
+                'thin': thin,
+                'allow_exchanges': allow_exchanges,
+                'max_nonzero': max_nonzero}
+
+        samples.append({'chains': chains,
+                        'args': args,
+                        'acceptance': fit['samples'][i]['acceptance'],
+                        'accept_stat': fit['samples'][i]['accept_stat']})
+
+    posterior_predictive = {
+        'samples': samples,
+        'n_chains': n_chains,
+        'n_iter': fit['n_iter'],
+        'warmup': fit['warmup'],
+        'thin': fit['thin'],
+        'n_save': fit['n_save'],
+        'warmup2': fit['warmup2'],
+        'max_nonzero': fit['max_nonzero'],
+        'permutation': fit['permutation'],
+        'random_seeds': random_seeds
+    }
+
+    return posterior_predictive
+
+
+def _sample_prior_full(formula_like, data=None,
+                       a_tau=1.0, b_tau=1.0, nu_sq=1.0,
+                       max_terms=None, n_iter=2000,
+                       force_intercept=True,
+                       generate_prior_predictive=False,
+                       random_state=None):
+    """Sample from prior over all models."""
+
+    rng = check_random_state(random_state)
+
+    lhs_terms, outcome_names, optional_terms, optional_term_names = \
+        _get_outcome_and_optional_terms(
+            formula_like, data=data, force_intercept=force_intercept)
+
+    n_outcomes = len(outcome_names)
+    n_terms = len(optional_terms)
+    max_terms = check_max_nonzero_indicators(
+        max_terms, n_indicators=n_terms)
+
+    k = np.zeros((n_iter, n_terms), dtype=int)
+    named_indicators = {
+        rdu.get_default_indicator_name(t): np.zeros((n_iter,), dtype=int)
+        for t in optional_term_names}
+    lp = np.empty((n_iter,))
+    sampled_outcomes = None
+
+    for i in range(n_iter):
+
+        k[i], lp[i] = _sample_uniform_structures_prior(
+            n_terms, max_terms=max_terms, random_state=rng)
+
+        for m in range(n_terms):
+            if k[i, m] == 1:
+                ind = rdu.get_default_indicator_name(
+                    optional_term_names[m])
+                named_indicators[ind][i] = 1
+
+        if generate_prior_predictive:
+            model_desc = _get_model_description(
+                k[i], lhs_terms=lhs_terms, optional_terms=optional_terms,
+                force_intercept=force_intercept)
+
+            _, model_sample = _sample_prior_fixed_model(
+                model_desc, data=data, a_tau=a_tau, b_tau=b_tau, nu_sq=nu_sq,
+                n_iter=1,
+                generate_prior_predictive=generate_prior_predictive,
+                random_state=rng)
+
+            if sampled_outcomes is None:
+                n_samples = model_sample['chains'][outcome_names[0]].shape[0]
+                sampled_outcomes = np.zeros((n_iter, n_samples, n_outcomes))
+
+            for j, n in enumerate(outcome_names):
+                sampled_outcomes[i, ..., j] = model_sample['chains'][n]
+
+    chains = collections.OrderedDict({'k': k})
+    for ind in named_indicators:
+        chains[ind] = named_indicators[ind]
+    chains['lp__'] = lp
+
+    args = {'random_state': random_state, 'n_iter': n_iter,
+            'max_nonzero': max_terms}
+
+    results = {'chains': chains,
+               'args': args,
+               'acceptance': 1.0,
+               'accept_stat': np.ones((n_iter,), dtype=float),
+               'mean_lp__': np.mean(chains['lp__'])}
+
+    prior_predictive = None
+    if generate_prior_predictive:
+        outcome_chains = collections.OrderedDict(
+            {n: sampled_outcomes[..., i]
+             for i, n in enumerate(outcome_names)})
+
+        prior_predictive = {
+            'chains': outcome_chains,
+            'args': args,
+            'acceptance': 1.0,
+            'accept_stat': np.ones((n_iter,), dtype=float)
+        }
+
+    return results, prior_predictive
+
+
+def _sample_posterior_full(formula_like, data=None,
+                           a_tau=1.0, b_tau=1.0, nu_sq=1.0,
+                           n_chains=4, n_iter=1000, warmup=None, thin=1,
+                           verbose=False,
+                           n_jobs=-1, max_terms=None,
+                           restart_file=None, init='random',
+                           allow_exchanges=True,
+                           generate_posterior_predictive=False,
+                           force_intercept=True,
+                           random_state=None):
+    """Sample from model posterior using MC3 algorithm."""
+
+    rng = check_random_state(random_state)
+
+    y, X = patsy.dmatrices(formula_like, data=data)
+    y, X = _check_design_matrices(y, X)
+
+    lhs_terms = y.design_info.terms
+    outcome_names = y.design_info.column_names
+    optional_terms, optional_term_names = _get_optional_terms(
+        X.design_info.terms, term_names=X.design_info.term_names,
+        force_intercept=force_intercept)
+
+    n_terms = len(optional_terms)
+    n_chains = rdu.check_number_of_chains(n_chains)
+
+    if restart_file is None:
+        initial_k = initialize_stepwise_mc3(
+            n_terms, n_chains=n_chains, max_nonzero=max_terms, method=init,
+            random_state=rng)
+    else:
+        restart_fit = az.from_netcdf(restart_file)
+
+        if n_chains != restart_fit.posterior.sizes['chain']:
+            warnings.warn(
+                'Number of saved chains does not match number '
+                'of requested chains '
+                '(got n_chains=%d but saved n_chains=%d)' %
+                (n_chains, restart_fit.posterior.sizes['chain']),
+                UserWarning)
+
+            n_chains = restart_fit.posterior.sizes['chain']
+
+        initial_k = restart_fit.posterior['k'].isel(draw=-1).data.copy()
+
+    def logp(k, data):
+        return bayes_regression_log_model_posterior(
+            k, data=data, max_terms=max_terms,
+            a_tau=a_tau, b_tau=b_tau, nu_sq=nu_sq,
+            formula_like=formula_like,
+            force_intercept=force_intercept)
+
+    fit = sample_stepwise_mc3(
+        initial_k, logp, data=data,
+        n_chains=n_chains, n_iter=n_iter, thin=thin,
+        warmup=warmup, verbose=verbose, n_jobs=n_jobs,
+        max_nonzero=max_terms, allow_exchanges=allow_exchanges,
+        random_state=rng)
+
+    # Generate named indicator variables for convenience.
+    fit = _add_named_indicator_variables_to_fit(
+        fit, term_names=optional_term_names)
+    coords = {'term': optional_term_names}
+    dims = {'k': ['term']}
+
+    posterior_predictive = None
+    if generate_posterior_predictive:
+        posterior_predictive = _get_structure_samples_posterior_predictive(
+            fit, formula_like, data=data,
+            a_tau=a_tau, b_tau=b_tau, nu_sq=nu_sq,
+            force_intercept=force_intercept, random_state=rng)
+
+    return convert_samples_dict_to_inference_data(
+        posterior=fit, posterior_predictive=posterior_predictive,
+        observed_data=data, save_warmup=True,
+        observed_data_names=outcome_names, coords=coords, dims=dims)
+
+
+def _unique_models(sample_ds, indicator_var='k'):
+    """Get list of unique models."""
+
+    n_total = sample_ds.sizes['chain'] * sample_ds.sizes['draw']
+
+    indicator_shape = sample_ds[indicator_var].shape
+    if len(indicator_shape) > 2:
+        n_indicators = indicator_shape[-1]
+        flat_indicators = np.reshape(
+            sample_ds[indicator_var].data, (n_total, n_indicators))
+    else:
+        flat_indicators = np.reshape(
+            sample_ds[indicator_var].data, (n_total, 1))
+
+    return np.unique(flat_indicators, axis=0)
+
+
+def _count_possible_models(sample_ds, max_nonzero=None, indicator_var='k'):
+    """Count the number of possible models."""
+
+    indicator_shape = sample_ds[indicator_var].shape
+    if len(indicator_shape) > 2:
+        n_indicators = indicator_shape[-1]
+    else:
+        n_indicators = 1
+
+    if max_nonzero is None:
+        max_nonzero = n_indicators
+
+    return int(sum([sp.comb(n_indicators, i)
+                    for i in range(max_nonzero + 1)]))
+
+
+def _get_model_lookup(sample_ds, indicator_var='k'):
+    """Get lookup table for model labels."""
+
+    unique_k = _unique_models(sample_ds, indicator_var=indicator_var)
+
+    return {tuple(ki): '{:d}'.format(i)
+            for i, ki in enumerate(unique_k)}
+
+
+def _get_model_indicators(sample_ds, only_sampled_models=True,
+                          max_nonzero=None, indicator_var='k'):
+    """Get indicator variables for individual models."""
+
+    model_lookup = _get_model_lookup(sample_ds, indicator_var=indicator_var)
+
+    n_chains = sample_ds.sizes['chain']
+    n_draws = sample_ds.sizes['draw']
+
+    z = np.empty((n_chains, n_draws), dtype=str)
 
     for i in range(n_chains):
 
-        k = fit['samples'][i]['chains']['k']
-        n_samples = k.shape[0]
-
-        for t in term_names:
-            ind = _default_indicator_name(t)
-            fit['samples'][i]['chains'][ind] = np.empty(
-                (n_samples,), dtype=int)
-
-        for j in range(n_samples):
-            for m, km in enumerate(k[j]):
-                ind = _default_indicator_name(term_names[m])
-                fit['samples'][i]['chains'][ind][j] = km
-
-    return fit
-
-
-class StepwiseBayesRegressionMC3Results():
-    """Wrapper class for results of MC3 sampling.
-
-    Parameters
-    ----------
-    fit : dict
-        Fit result returned from calling sample_stepwise_mc3.
-
-    random_state : integer, RandomState or None
-        If an integer, random_state is the seed used by the
-        random number generator. If a RandomState instance,
-        random_state is the random number generator. If None,
-        the random number generator is the RandomState instance
-        used by `np.random`.
-
-    Attributes
-    ----------
-    samples : list
-        Samples produced by MC3 sampling.
-
-    n_chains : int
-        Number of chains used for sampling.
-
-    n_iter : int
-        Number of samples per chain.
-
-    warmup : int
-        Number of warmup samples.
-
-    thin : int
-        Stride used for thinning samples.
+        chain_k = sample_ds[indicator_var].isel(chain=i).data
 
-    n_save : list
-        Number of saved samples in each chain.
+        for t in range(n_draws):
+            z[i, t] = model_lookup[tuple(chain_k[t])]
 
-    warmup2 : int
-        Number of warmup samples after thinning in each chain.
-
-    permutation : list
-        List of permutations for individual chains.
+    model_indicators = [model_lookup[i] for i in model_lookup]
+    if not only_sampled_models:
+        n_observed_models = len(model_indicators)
+        n_possible_models = _count_possible_models(
+            sample_ds, max_nonzero=max_nonzero, indicator_var=indicator_var)
+        model_indicators += ['{:d}'.format(i)
+                             for i in range(n_observed_models,
+                                            n_possible_models)]
 
-    random_seeds : list
-        Random seeds used for sampling.
-    """
-    def __init__(self, fit, term_names=None, random_state=None):
-
-        self.samples = deepcopy(fit['samples'])
-        self.n_chains = fit['n_chains']
-        self.n_iter = fit['n_iter']
-        self.warmup = fit['warmup']
-        self.thin = fit['thin']
-        self.n_save = deepcopy(fit['n_save'])
-        self.warmup2 = deepcopy(fit['warmup2'])
-        self.permutation = deepcopy(fit['permutation'])
-        self.random_seeds = deepcopy(fit['random_seeds'])
-        self.max_nonzero = fit['max_nonzero']
-        self.term_names = term_names
-        self.random_state = random_state
+    return z, model_indicators
 
-        # Options for calculating diagnostics.
-        self.sparse = True
-        self.min_epsilon = 1e-10
-        self.tolerance = 1e-3
-        self.fit_kwargs = None
 
-        # Name of the indicator variable in sampling output.
-        self._ind_var = 'k'
+def structure_sample_convergence_rate(sample_ds, max_nonzero=None,
+                                      only_sampled_models=False,
+                                      indicator_var='k', sparse=False,
+                                      combine_chains=False):
+    """Estimate convergence rate for structure chains."""
 
-    def _unique_models(self, inc_warmup=False):
-        """Get list of unique models."""
-
-        if self.samples[0]['chains'][self._ind_var].ndim == 1:
-            n_indicators = 1
-        else:
-            n_indicators = self.samples[0]['chains'][self._ind_var].shape[1]
+    z, model_indicators = _get_model_indicators(
+        sample_ds, max_nonzero=max_nonzero,
+        only_sampled_models=only_sampled_models,
+        indicator_var=indicator_var)
 
-        n_kept = []
-        for i in range(self.n_chains):
-            if inc_warmup:
-                n_kept.append(self.n_save[i])
-            else:
-                n_kept.append(self.n_save[i] - self.warmup2[i])
-
-        n_total = sum(n_kept)
+    return estimate_convergence_rate(z, model_indicators=model_indicators,
+                                     sparse=sparse,
+                                     combine_chains=combine_chains)
 
-        k = np.empty((n_total, n_indicators))
-        pos = 0
-        for i in range(self.n_chains):
-            chain_k = self.samples[i]['chains'][self._ind_var]
-            if chain_k.ndim == 1:
-                chain_k = chain_k[:, np.newaxis]
-            k[pos:pos + n_kept[i]] = chain_k[-n_kept[i]:]
-            pos += n_kept[i]
 
-        return np.unique(k, axis=0)
+def structure_sample_chi2_convergence_diagnostics(sample_ds, max_nonzero=None,
+                                                  indicator_var='k',
+                                                  batch=True, **kwargs):
+    """Calculate chi squared convergence diagnostics."""
 
-    def _count_possible_models(self):
-        """Count the number of possible models."""
+    z, _ = _get_model_indicators(
+        sample_ds, max_nonzero=max_nonzero,
+        only_sampled_models=False,
+        indicator_var=indicator_var)
 
-        if self.samples[0]['chains'][self._ind_var].ndim == 1:
-            n_indicators = 1
-        else:
-            n_indicators = self.samples[0]['chains'][self._ind_var].shape[1]
+    if batch:
+        return rjmcmc_batch_chisq_convergence(
+            z, **kwargs)
 
-        if self.max_nonzero is None:
-            max_nonzero = n_indicators
+    return rjmcmc_chisq_convergence(
+        z, **kwargs)
 
-        return sum([sp.comb(n_indicators, i)
-                    for i in range(max_nonzero + 1)])
 
-    def _get_model_lookup(self, inc_warmup=False):
-        """Get lookup table for model labels."""
+def structure_sample_ks_convergence_diagnostics(sample_ds, max_nonzero=None,
+                                                indicator_var='k',
+                                                batch=True, **kwargs):
+    """Calculate chi squared convergence diagnostics."""
 
-        unique_k = self._unique_models(inc_warmup=inc_warmup)
+    z, _ = _get_model_indicators(
+        sample_ds, max_nonzero=max_nonzero,
+        only_sampled_models=False,
+        indicator_var=indicator_var)
 
-        return {tuple(ki): '{:d}'.format(i)
-                for i, ki in enumerate(unique_k)}
+    if batch:
+        return rjmcmc_batch_kstest_convergence(
+            z, **kwargs)
 
-    def _get_model_indicators(self, inc_warmup=False,
-                              only_sampled_models=True):
-        """Get indicator variables for individual models."""
+    return rjmcmc_kstest_convergence(
+        z, **kwargs)
 
-        model_lookup = self._get_model_lookup(inc_warmup=inc_warmup)
 
-        if inc_warmup:
-            n_samples = self.n_save[0]
-        else:
-            n_samples = self.n_save[0] - self.warmup2[0]
+def structure_sample_diagnostics(sample_ds, max_nonzero=None,
+                                 n_samples=100, only_sampled_models=True,
+                                 epsilon=None, sparse=True,
+                                 min_epsilon=1e-6, tolerance=1e-4,
+                                 fit_kwargs=None, indicator_var='k',
+                                 random_state=None):
 
-        z = np.empty((self.n_chains, n_samples), dtype=str)
+    z, model_indicators = _get_model_indicators(
+        sample_ds, max_nonzero=max_nonzero,
+        only_sampled_models=only_sampled_models,
+        indicator_var=indicator_var)
 
-        for i in range(self.n_chains):
+    return estimate_stationary_distribution(
+        z, model_indicators=model_indicators, sparse=sparse,
+        epsilon=epsilon, n_samples=n_samples,
+        min_epsilon=min_epsilon, tolerance=tolerance,
+        fit_kwargs=fit_kwargs, random_state=random_state)
 
-            if inc_warmup:
-                chain_k = self.samples[i]['chains'][self._ind_var]
-            else:
-                n_kept = self.n_save[i] - self.warmup2[i]
-                chain_k = self.samples[i]['chains'][self._ind_var][-n_kept:]
 
-            for t in range(n_samples):
-                z[i, t] = model_lookup[tuple(chain_k[t])]
+def _get_model_indicator_arrays(sample_ds, indicator_var='k'):
+    """Get values of indicator variables in each model."""
 
-        model_indicators = [model_lookup[i] for i in model_lookup]
-        if not only_sampled_models:
-            n_observed_models = len(model_indicators)
-            n_possible_models = self._count_possible_models()
-            model_indicators += ['{:d}'.format(i)
-                                 for i in range(n_observed_models,
-                                                n_possible_models)]
+    indicator_shape = sample_ds[indicator_var].shape
+    if len(indicator_shape) > 2:
+        n_indicators = indicator_shape[-1]
+    else:
+        n_indicators = 1
 
-        return z, model_indicators
+    term_names = sample_ds['term'].values
 
-    def diagnostics(self, n_samples=100, epsilon=None, inc_warmup=False,
-                    only_sampled_models=True):
+    model_lookup = _get_model_lookup(sample_ds, indicator_var=indicator_var)
+    indicator_lookup = {model_lookup[k]: k for k in model_lookup}
 
-        z, model_indicators = self._get_model_indicators(
-            inc_warmup=inc_warmup, only_sampled_models=only_sampled_models)
+    model_names = np.array(list(indicator_lookup.keys()))
+    n_observed_models = len(model_names)
 
-        return estimate_stationary_distribution(
-            z, model_indicators=model_indicators, sparse=self.sparse,
-            epsilon=epsilon, n_samples=n_samples,
-            min_epsilon=self.min_epsilon, tolerance=self.tolerance,
-            fit_kwargs=self.fit_kwargs, random_state=self.random_state)
+    indicator_vals = {}
+    for i in range(n_indicators):
+        ki_vals = np.zeros((n_observed_models,), dtype=int)
+        for j, m in enumerate(model_names):
+            ki_vals[j] = indicator_lookup[m][i]
 
-    def posterior_mode(self, inc_warmup=False):
-        """Get posterior mode for sampled structures."""
+        term_name = term_names[i]
+        indicator_vals[term_name] = ki_vals
 
-        post_mode_lp = -np.inf
-        post_mode = None
-        for i in range(self.n_chains):
+    return indicator_vals
 
-            chain = self.samples[i]['chains']
 
-            if inc_warmup:
-                chain_log_post = chain['lp__']
-                chain_mode_ind = np.argmax(chain_log_post)
-            else:
-                n_kept = self.n_save[i] - self.warmup2[i]
-                chain_log_post = chain['lp__'][-n_kept:]
-                chain_mode_ind = n_kept + np.argmax(chain_log_post)
+def _calculate_model_logp(sample_ds, sample_stats_ds, indicator_var='k'):
+    """Calculate logp for each model."""
 
-            chain_mode = {p: chain[p][chain_mode_ind] for p in chain}
-            chain_mode_lp = chain['lp__'][chain_mode_ind]
+    n_chains = sample_ds.sizes['chain']
 
-            if chain_mode_lp > post_mode_lp:
-                post_mode_lp = chain_mode_lp
-                post_mode = chain_mode
+    model_lookup = _get_model_lookup(sample_ds, indicator_var=indicator_var)
+    indicator_lookup = {model_lookup[k]: k for k in model_lookup}
 
-        return post_mode, post_mode_lp
+    model_names = np.array(list(indicator_lookup.keys()))
+    n_observed_models = len(model_names)
 
-    def _get_nonindicator_parameters(self):
-        """Get names of all parameters other than indicators vector."""
-        par_names = []
-        for i in range(self.n_chains):
+    model_lp = np.zeros((n_observed_models,))
+    model_counts = np.zeros((n_observed_models,), dtype=int)
+    for j in range(n_chains):
 
-            chain = self.samples[i]['chains']
-            chain_pars = [p for p in chain if p != self._ind_var]
+        chain_k = sample_ds[indicator_var].isel(chain=j).data
+        chain_lp = sample_stats_ds['lp'].isel(chain=j).data
 
-            for p in chain_pars:
-                if p not in par_names:
-                    par_names.append(p)
+        for i, m in enumerate(indicator_lookup):
+            model_k = indicator_lookup[m]
+            mask = np.all(chain_k == model_k, axis=1)
+            model_lp[i] += np.sum(chain_lp[mask])
+            model_counts[i] += np.sum(mask)
 
-        return par_names
+    model_lp = model_lp / model_counts
 
-    def indicators_summary(self, probs=None, inc_warmup=False):
-        """Return summary of sampled indicator variables."""
+    return model_lp
 
-        # Determine variables to show in output and number of
-        # samples for each.
-        par_names = self._get_nonindicator_parameters()
 
-        n_kept = []
-        for i in range(self.n_chains):
-            if inc_warmup:
-                n_kept.append(self.n_save[i])
-            else:
-                n_kept.append(self.n_save[i] - self.warmup2[i])
+def _calculate_model_posterior_probabilities(sample_ds, indicator_var='k'):
+    """Calculate posterior probability for each model."""
 
-        n_samples = sum(n_kept)
+    n_chains = sample_ds.sizes['chain']
 
-        par_samples = {}
-        for p in par_names:
-            par_dims = get_sampled_parameter_dimensions(
-                self.samples[0]['chains'], p)
+    model_lookup = _get_model_lookup(sample_ds, indicator_var=indicator_var)
+    indicator_lookup = {model_lookup[k]: k for k in model_lookup}
 
-            par_data = np.empty((n_samples,) + par_dims)
+    model_names = np.array(list(indicator_lookup.keys()))
+    n_observed_models = len(model_names)
 
-            pos = 0
-            for i in range(self.n_chains):
-                par_data[pos:pos + n_kept[i]] = \
-                    self.samples[i]['chains'][p][-n_kept[i]:]
-                pos += n_kept[i]
+    model_counts = np.zeros((n_observed_models,), dtype=int)
 
-            if par_dims:
-                par_data = np.moveaxis(par_data, 0, -1)
-                # Flatten samples.
-                indices = itertools.product(*[range(d) for d in par_dims])
-                for idx in indices:
-                    idx_str = ''.join(['{:d}'.format(d) for d in idx])
-                    flat_par_name = '{}_{}'.format(p, idx_str)
-                    par_samples[flat_par_name] = par_data[idx]
-            else:
-                par_samples[p] = par_data
+    n_samples = 0
+    for j in range(n_chains):
 
-        # Evaluate summary statistics for sample.
-        return get_sample_summary_statistics(par_samples, probs=probs)
+        chain_k = sample_ds[indicator_var].isel(chain=j).data
 
-    def _get_model_indicator_arrays(self, inc_warmup=False):
-        """Get values of indicator variables in each model."""
+        chain_k = [tuple(k) for k in chain_k]
+        n_samples += len(chain_k)
 
-        if self.samples[0]['chains'][self._ind_var].ndim == 1:
-            n_indicators = 1
-        else:
-            n_indicators = self.samples[0]['chains'][self._ind_var].shape[1]
+        for i, m in enumerate(model_names):
+            km = indicator_lookup[m]
+            model_counts[i] += sum([k == km for k in chain_k])
 
-        model_lookup = self._get_model_lookup(inc_warmup=inc_warmup)
-        indicator_lookup = {model_lookup[k]: k for k in model_lookup}
+    return model_counts / n_samples
 
-        model_names = np.array(list(indicator_lookup.keys()))
-        n_observed_models = len(model_names)
 
-        indicator_vals = {}
-        for i in range(n_indicators):
-            ki_vals = np.zeros((n_observed_models,), dtype=int)
-            for j, m in enumerate(model_names):
-                ki_vals[j] = indicator_lookup[m][i]
+def stepwise_model_samples_summary(inference_data, show_indicators=True,
+                                   posterior=True, sort_by_probs=True,
+                                   indicator_var='k'):
+    """Return summary of sampled models."""
 
-            if self.term_names is None:
-                term_name = 'k{:d}'.format(i)
-            else:
-                term_name = self.term_names[i]
+    if posterior:
+        sample_ds = inference_data.posterior
+    else:
+        sample_ds = inference_data.prior
 
-            indicator_vals[term_name] = ki_vals
+    model_lookup = _get_model_lookup(sample_ds, indicator_var=indicator_var)
+    indicator_lookup = {model_lookup[k]: k for k in model_lookup}
 
-        return indicator_vals
+    model_names = np.array(list(indicator_lookup.keys()))
 
-    def _calculate_model_logp(self, inc_warmup=False):
-        """Calculate logp for each model."""
+    if show_indicators:
+        indicator_vals = _get_model_indicator_arrays(
+            sample_ds, indicator_var=indicator_var)
+    else:
+        indicator_vals = None
 
-        model_lookup = self._get_model_lookup(inc_warmup=inc_warmup)
-        indicator_lookup = {model_lookup[k]: k for k in model_lookup}
+    model_probs = _calculate_model_posterior_probabilities(
+        sample_ds, indicator_var=indicator_var)
+    model_lp = _calculate_model_logp(
+        sample_ds, inference_data.sample_stats,
+        indicator_var=indicator_var)
 
-        model_names = np.array(list(indicator_lookup.keys()))
-        n_observed_models = len(model_names)
+    if sort_by_probs:
+        model_order = np.argsort(-model_probs)
 
-        model_lp = np.zeros((n_observed_models,))
-        model_counts = np.zeros((n_observed_models,), dtype=int)
-        for j in range(self.n_chains):
+        model_names = model_names[model_order]
+        model_probs = model_probs[model_order]
+        model_lp = model_lp[model_order]
 
-            if inc_warmup:
-                chain_k = self.samples[j]['chains'][self._ind_var]
-                chain_lp = self.samples[j]['chains']['lp__']
-            else:
-                n_kept = self.n_save[j] - self.warmup2[j]
-                chain_k = self.samples[j]['chains'][self._ind_var][-n_kept:]
-                chain_lp = self.samples[j]['chains']['lp__'][-n_kept:]
-
-            for i, m in enumerate(indicator_lookup):
-                model_k = indicator_lookup[m]
-                mask = np.all(chain_k  == model_k, axis=1)
-                model_lp[i] += np.sum(chain_lp[mask])
-                model_counts[i] += np.sum(mask)
-
-        model_lp = model_lp / model_counts
-
-        return model_lp
-
-    def _calculate_model_posterior_probabilities(self, inc_warmup=False):
-        """Calculate posterior probability for each model."""
-
-        model_lookup = self._get_model_lookup(inc_warmup=inc_warmup)
-        indicator_lookup = {model_lookup[k]: k for k in model_lookup}
-
-        model_names = np.array(list(indicator_lookup.keys()))
-        n_observed_models = len(model_names)
-
-        model_counts = np.zeros((n_observed_models,), dtype=int)
-
-        n_samples = 0
-        for j in range(self.n_chains):
-
-            if inc_warmup:
-                chain_k = self.samples[j]['chains'][self._ind_var]
-            else:
-                n_kept = self.n_save[j] - self.warmup2[j]
-                chain_k = self.samples[j]['chains'][self._ind_var][-n_kept:]
-
-            chain_k = [tuple(k) for k in chain_k]
-            n_samples += len(chain_k)
-
-            for i, m in enumerate(model_names):
-                km = indicator_lookup[m]
-                model_counts[i] += sum([k == km for k in chain_k])
-
-        return model_counts / n_samples
-
-    def _calculate_posterior_probability_ci(self, inc_warmup=False,
-                                            alpha=0.05, **kwargs):
-        """Calculate credible intervals for posterior probabilities."""
-
-        diagnostics = self.diagnostics(inc_warmup=inc_warmup, **kwargs)
-
-        mask = np.isfinite(np.sum(diagnostics['pi'], axis=1))
-        ci_lower = np.quantile(diagnostics['pi'][mask], 0.05 * alpha, axis=0)
-        ci_upper = np.quantile(diagnostics['pi'][mask], 1 - 0.05 * alpha, axis=0)
-
-        return ci_lower, ci_upper
-
-    def model_summary(self, inc_warmup=False, show_indicators=True,
-                      sort_by_probs=True, include_ci=False, alpha=0.05,
-                      **diagnostics_kwargs):
-        """Return summary of sampled models."""
-
-        model_lookup = self._get_model_lookup(inc_warmup=inc_warmup)
-        indicator_lookup = {model_lookup[k]: k for k in model_lookup}
-
-        model_names = np.array(list(indicator_lookup.keys()))
-
-        if show_indicators:
-            indicator_vals = self._get_model_indicator_arrays(
-                inc_warmup=inc_warmup)
-        else:
-            indicator_vals = None
-
-        model_probs = self._calculate_model_posterior_probabilities(
-            inc_warmup=inc_warmup)
-        model_lp = self._calculate_model_logp(inc_warmup=inc_warmup)
-
-        if include_ci:
-            model_probs_lower, model_probs_upper = \
-                self._calculate_posterior_probability_ci(
-                    inc_warmup=inc_warmup, alpha=alpha,
-                    **diagnostics_kwargs)
-        else:
-            model_probs_lower = None
-            model_probs_upper = None
-
-        if sort_by_probs:
-            model_order = np.argsort(-model_probs)
-
-            model_names = model_names[model_order]
-            model_probs = model_probs[model_order]
-            model_lp = model_lp[model_order]
-
-            if show_indicators:
-                for ki in indicator_vals:
-                    indicator_vals[ki] = indicator_vals[ki][model_order]
-
-            if include_ci:
-                model_probs_lower = model_probs_lower[model_order]
-                model_probs_upper = model_probs_upper[model_order]
-
-        data_vars = collections.OrderedDict({'model': model_names})
         if show_indicators:
             for ki in indicator_vals:
-                data_vars[ki] = indicator_vals[ki]
+                indicator_vals[ki] = indicator_vals[ki][model_order]
 
-        data_vars['lp__'] = model_lp
-        data_vars['p'] = model_probs
-        if include_ci:
-            data_vars[format_percentile(0.5 * alpha)] = model_probs_lower
-            data_vars[format_percentile(1 - 0.5 * alpha)] = \
-                model_probs_upper
+    data_vars = collections.OrderedDict({'model': model_names})
+    if show_indicators:
+        for ki in indicator_vals:
+            data_vars[ki] = indicator_vals[ki]
 
-        return pd.DataFrame(data_vars)
+    data_vars['lp__'] = model_lp
+    data_vars['p'] = model_probs
+
+    return pd.DataFrame(data_vars)
 
 
 class StepwiseBayesRegression():
@@ -712,76 +1123,9 @@ class StepwiseBayesRegression():
         self.allow_exchanges = True
         self.force_intercept = force_intercept
 
-    def _initialize_mc3_random(self, n_terms, n_chains=1, max_terms=None,
-                               random_state=None):
-        """Get initial state for MC3 sampler."""
-
-        rng = check_random_state(random_state)
-
-        initial_k = np.zeros((n_chains, n_terms), dtype=int)
-
-        max_terms = _check_max_terms(max_terms, n_terms=n_terms)
-
-        # Draw initial set of terms uniformly from possible sets of
-        # terms.
-        n_possible_sets = np.sum([sp.comb(n_terms, k)
-                                  for k in range(max_terms + 1)])
-        weights = np.array([sp.comb(n_terms, k) / n_possible_sets
-                            for k in range(max_terms + 1)])
-
-        for i in range(n_chains):
-
-            terms_set_size = rng.choice(max_terms + 1, p=weights)
-            term_indices = rng.choice(n_terms, size=terms_set_size,
-                                      replace=False)
-
-            initial_k[i, term_indices] = 1
-
-        return initial_k
-
-    def _initialize_mc3(self, n_terms, method='random', **kwargs):
-        """Draw initial values for indicator set."""
-
-        if method == 'random':
-            return self._initialize_mc3_random(n_terms, **kwargs)
-
-        raise ValueError(
-            "Unrecognized initialization method '%r'" % method)
-
-    def _get_model_description(self, k, lhs_terms=None, optional_terms=None):
-        """Get model description from indicators vector."""
-
-        rhs_terms = []
-        if self.force_intercept:
-            rhs_terms.append(patsy.INTERCEPT)
-
-        for m, km in enumerate(k):
-            if km == 1:
-                rhs_terms.append(optional_terms[m])
-
-        model_desc = patsy.ModelDesc(lhs_terms, rhs_terms)
-
-        return model_desc
-
-    def _log_model_posterior(self, k, data=None, max_terms=None,
-                             lhs_terms=None, optional_terms=None):
-        """Evaluate log model posterior probability."""
-
-        lp = log_uniform_indicator_set_prior(k, max_nonzero=max_terms)
-
-        model_desc = self._get_model_description(
-            k, lhs_terms=lhs_terms, optional_terms=optional_terms)
-
-        y, X = patsy.dmatrices(model_desc, data=data)
-
-        lp += bayes_regression_normal_gamma_log_marginal_likelihood(
-            y, X, a_tau=self.a_tau, b_tau=self.b_tau,
-            nu_sq=self.nu_sq)
-
-        return lp
-
     def sample_structures_prior(self, formula_like, data=None,
                                 max_terms=None, n_chains=4, n_iter=1000,
+                                n_jobs=-1, generate_prior_predictive=False,
                                 random_state=None):
         """Sample structures for model from uniform priors.
 
@@ -821,78 +1165,61 @@ class StepwiseBayesRegression():
 
         rng = check_random_state(random_state)
 
+        _, outcome_names, _, _ = \
+            _get_outcome_and_optional_terms(
+                formula_like, data=data,
+                force_intercept=self.force_intercept)
+
         n_chains = rdu.check_number_of_chains(n_chains)
         n_iter = rdu.check_number_of_iterations(n_iter)
 
-        try:
-            # Try to infer the possible terms from the general case
-            # where pre-formed design matrices or a formula string
-            # may be given.
-            y, X = patsy.dmatrices(formula_like, data=data)
-            y, X = _check_design_matrices(y, X)
-
-            optional_terms, optional_term_names = _get_optional_terms(
-                X.design_info.terms, term_names=X.design_info.term_names,
-                force_intercept=self.force_intercept)
-
-        except patsy.PatsyError as err:
-            # If this fails, fall back on trying to construct the
-            # model from a formula string.
-            full_model = patsy.ModelDesc.from_formula(formula_like)
-
-            optional_terms, _ = _get_optional_terms(
-                full_model.rhs_termlist, force_intercept=self.force_intercept)
-            optional_term_names = [t.name() for t in optional_terms]
-
-        n_terms = len(optional_terms)
-        max_terms = _check_max_terms(max_terms, n_terms=n_terms)
+        if n_jobs is None:
+            n_jobs = -1
+        elif n_chains == 1:
+            n_jobs = 1
 
         random_seeds = rng.choice(1000000 * n_chains,
                                   size=n_chains, replace=False)
 
-        samples = []
-        for i in range(n_chains):
+        def _sample(seed):
+            return _sample_prior_full(
+                formula_like, data=data,
+                a_tau=self.a_tau, b_tau=self.b_tau, nu_sq=self.nu_sq,
+                max_terms=max_terms, n_iter=n_iter,
+                force_intercept=self.force_intercept,
+                generate_prior_predictive=generate_prior_predictive,
+                random_state=seed)
 
-            chain_rng = check_random_state(random_seeds[i])
+        samples = Parallel(n_jobs=n_jobs)(
+            delayed(_sample)(seed) for seed in random_seeds)
 
-            k = np.zeros((n_iter, n_terms), dtype=int)
-            named_indicators = {
-                _default_indicator_name(t): np.zeros((n_iter,), dtype=int)
-                for t in optional_term_names}
-            lp = np.empty((n_iter,))
+        structure_samples = [sample[0] for sample in samples]
 
-            for j in range(n_iter):
-
-                k[j], lp[j] = _sample_uniform_structures_prior(
-                    n_terms, max_terms=max_terms, random_state=rng)
-
-                for m in range(n_terms):
-                    if k[j, m] == 1:
-                        ind = _default_indicator_name(
-                            optional_term_names[m])
-                        named_indicators[ind][j] = 1
-
-            chains = collections.OrderedDict({'k': k})
-            for ind in named_indicators:
-                chains[ind] = named_indicators[ind]
-            chains['lp__'] = lp
-
-            args = {'random_state': random_seeds[i], 'n_iter': n_iter}
-            sample = {'chains': chains,
-                      'args': args,
-                      'mean_lp__': np.mean(chains['lp__'])}
-
-            samples.append(sample)
-
-        draws = {'samples': samples,
+        prior = {'samples': structure_samples,
                  'n_chains': len(samples),
                  'n_iter': n_iter,
+                 'n_save': [n_iter] * n_chains,
                  'random_seeds': random_seeds}
 
-        return draws
+        prior_predictive = None
+        if generate_prior_predictive:
+            generated_samples = [sample[1] for sample in samples]
+            prior_predictive = {
+                'samples': generated_samples,
+                'n_chains': len(samples),
+                'n_iter': n_iter,
+                'n_save': [n_iter] * n_chains,
+                'random_seeds': random_seeds}
 
-    def sample_parameter_priors(self, formula_like, data=None, n_chains=4,
-                                n_iter=1000, random_state=None):
+        return convert_samples_dict_to_inference_data(
+            prior=prior,
+            prior_predictive=prior_predictive,
+            observed_data=data, save_warmup=True,
+            observed_data_names=outcome_names)
+
+    def sample_parameters_prior(self, formula_like, data=None, n_chains=4,
+                                n_iter=1000, n_jobs=-1,  random_state=None,
+                                generate_prior_predictive=False):
         """Sample parameters for model from conditional priors.
 
         Parameters
@@ -929,110 +1256,61 @@ class StepwiseBayesRegression():
         n_chains = rdu.check_number_of_chains(n_chains)
         n_iter = rdu.check_number_of_iterations(n_iter)
 
+        if n_jobs is None:
+            n_jobs = -1
+        elif n_chains == 1:
+            n_jobs = 1
+
         y, X = patsy.dmatrices(formula_like, data=data)
         y, X = _check_design_matrices(y, X)
 
-        coef_names = X.design_info.column_names
-        n_coefs = len(coef_names)
+        outcome_names = y.design_info.column_names
 
         random_seeds = rng.choice(1000000 * n_chains,
                                   size=n_chains, replace=False)
 
-        samples = []
-        for i in range(n_chains):
+        def _sample(seed):
+            return _sample_prior_fixed_model(
+                formula_like, data=data, a_tau=self.a_tau, b_tau=self.b_tau,
+                nu_sq=self.nu_sq, n_iter=n_iter,
+                generate_prior_predictive=generate_prior_predictive,
+                random_state=seed)
 
-            chain_rng = check_random_state(random_seeds[i])
+        samples = Parallel(n_jobs=n_jobs)(
+            delayed(_sample)(seed) for seed in random_seeds)
 
-            beta, tau_sq, lp = _sample_parameters_conjugate_priors(
-                n_coefs, a_tau=self.a_tau, b_tau=self.b_tau,
-                nu_sq=self.nu_sq, size=n_iter, random_state=chain_rng)
+        parameter_samples = [sample[0] for sample in samples]
 
-            chains = collections.OrderedDict({'tau_sq': tau_sq})
-            for j, t in enumerate(coef_names):
-                chains[t] = beta[:, j]
-            chains['lp__'] = lp
-
-            args = {'random_state': random_seeds[i], 'n_iter': n_iter}
-            sample = {'chains': chains,
-                      'args': args,
-                      'mean_lp__': np.mean(chains['lp__'])}
-
-            samples.append(sample)
-
-        draws = {'samples': samples,
+        prior = {'samples': parameter_samples,
                  'n_chains': len(samples),
                  'n_iter': n_iter,
+                 'n_save': [n_iter] * n_chains,
                  'random_seeds': random_seeds}
 
-        return draws
+        prior_predictive = None
+        if generate_prior_predictive:
+            generated_samples = [sample[1] for sample in samples]
+            prior_predictive = {
+                'samples': generated_samples,
+                'n_chains': len(samples),
+                'n_iter': n_iter,
+                'n_save': [n_iter] * n_chains,
+                'random_seeds': random_seeds}
 
-    def sample_structures_mc3(self, formula_like, data=None, n_chains=4,
-                              n_iter=1000, warmup=None, thin=1, verbose=False,
-                              n_jobs=-1, max_terms=None, sample_file=None,
-                              restart_file=None, init='random',
-                              allow_exchanges=True, random_state=None):
-        """Sample models using MC3 algorithm."""
+        return convert_samples_dict_to_inference_data(
+            prior=prior,
+            prior_predictive=prior_predictive,
+            observed_data=data, save_warmup=True,
+            observed_data_names=outcome_names)
 
-        rng = check_random_state(random_state)
-
-        y, X = patsy.dmatrices(formula_like, data=data)
-        y, X = _check_design_matrices(y, X)
-
-        lhs_terms = y.design_info.terms
-        optional_terms, optional_term_names = _get_optional_terms(
-            X.design_info.terms, term_names=X.design_info.term_names,
-            force_intercept=self.force_intercept)
-
-        n_terms = len(optional_terms)
-        n_chains = rdu.check_number_of_chains(n_chains)
-
-        if restart_file is None:
-            initial_k = self._initialize_mc3(n_terms, n_chains=n_chains,
-                                             max_terms=max_terms, method=init,
-                                             random_state=rng)
-
-        else:
-            restart_fit = az.from_netcdf(restart_file)
-
-            if n_chains != restart_fit.posterior.sizes['chain']:
-                warnings.warn(
-                    'Number of saved chains does not match number '
-                    'of requested chains '
-                    '(got n_chains=%d but saved n_chains=%d)' %
-                    (n_chains, restart_fit.posterior.sizes['chain']),
-                    UserWarning)
-
-                n_chains = restart_fit.posterior.sizes['chain']
-
-            initial_k = restart_fit.posterior['k'].isel(draw=-1).data.copy()
-
-        def logp(k, data):
-            return self._log_model_posterior(
-                k, data=data, max_terms=max_terms,
-                lhs_terms=lhs_terms,
-                optional_terms=optional_terms)
-
-        fit = sample_stepwise_mc3(
-            initial_k, logp, data=data,
-            n_chains=n_chains, n_iter=n_iter, thin=thin,
-            warmup=warmup, verbose=verbose, n_jobs=n_jobs,
-            max_nonzero=max_terms, allow_exchanges=self.allow_exchanges,
-            random_state=rng)
-
-        # Generate named indicator variables for convenience.
-        fit = _add_named_indicator_variables_to_fit(
-            fit, term_names=optional_term_names)
-
-        if sample_file is not None:
-            write_stepwise_mc3_samples(
-                fit, sample_file, data=data)
-
-        return StepwiseBayesRegressionMC3Results(
-            fit, term_names=optional_term_names)
-
-    def _sample_prior_predictive_fixed_model(self, formula_like, data=None,
-                                             n_iter=1000, random_state=None):
-        """Sample from the prior predictive distribution for a single model.
+    def sample_structures_posterior(self, formula_like, data=None,
+                                    max_terms=None,
+                                    n_chains=4, n_iter=1000, thin=1,
+                                    warmup=None, n_jobs=-1,
+                                    verbose=False, restart_file=None,
+                                    init='random', random_state=None,
+                                    generate_posterior_predictive=False):
+        """Sample parameters for model from conditional posteriors.
 
         Parameters
         ----------
@@ -1044,8 +1322,17 @@ class StepwiseBayesRegression():
         data : dict-like
             Data to be used in constructing the model.
 
+        n_chains : int, default: 4
+            Number of chains.
+
         n_iter : int, default: 1000
             Number of samples per chain.
+
+        thin : int, default: 1
+            Interval used for thinning samples.
+
+        warmup : int, optional
+            Number of warm-up samples.
 
         random_state : integer, RandomState or None
             If an integer, random_state is the seed used by the
@@ -1056,78 +1343,49 @@ class StepwiseBayesRegression():
 
         Returns
         -------
-        sample : dict
+        draws : dict
             Dictionary containing the results of sampling.
         """
 
-        rng = check_random_state(random_state)
+        return _sample_posterior_full(
+            formula_like, data=data,
+            a_tau=self.a_tau, b_tau=self.b_tau, nu_sq=self.nu_sq,
+            n_chains=n_chains, n_iter=n_iter, warmup=warmup, thin=thin,
+            verbose=verbose, n_jobs=n_jobs, max_terms=max_terms,
+            restart_file=restart_file, init=init,
+            allow_exchanges=self.allow_exchanges,
+            force_intercept=self.force_intercept,
+            generate_posterior_predictive=generate_posterior_predictive,
+            random_state=random_state)
 
-        n_iter = rdu.check_number_of_iterations(n_iter)
-
-        y, X = patsy.dmatrices(formula_like, data=data)
-        y, X = _check_design_matrices(y, X)
-
-        outcome_names = y.design_info.column_names
-        coef_names = X.design_info.column_names
-        n_coefs = len(coef_names)
-
-        # Sample parameters for the model.
-        beta, tau_sq, lp = _sample_parameters_conjugate_priors(
-            n_coefs, a_tau=self.a_tau, b_tau=self.b_tau,
-            nu_sq=self.nu_sq, size=n_iter, random_state=rng)
-
-        # Sample outcomes given parameters.
-        cond_means = np.matmul(X, beta[..., np.newaxis])
-        cond_scales = np.sqrt(1.0 / tau_sq)
-        cond_scales = np.broadcast_to(cond_scales[:, np.newaxis, np.newaxis],
-                                      (n_iter,) + y.shape)
-
-        sampled_outcomes = ss.norm.rvs(
-            loc=cond_means, scale=cond_scales,
-            size=((n_iter,) + y.shape), random_state=rng)
-
-        lp += np.sum(ss.norm.logpdf(
-                sampled_outcomes, loc=cond_means,
-                scale=cond_scales),
-            axis=tuple(range(1, sampled_outcomes.ndim)))
-
-        chains = collections.OrderedDict(
-            {n: sampled_outcomes[..., i]
-             for i, n in enumerate(outcome_names)})
-        chains['tau_sq'] = tau_sq
-        for j, t in enumerate(coef_names):
-            chains[t] = beta[:, j]
-        chains['lp__'] = lp
-
-        args = {'random_state': random_state, 'n_iter': n_iter}
-        sample = {'chains': chains,
-                  'args': args,
-                  'mean_lp__': np.mean(chains['lp__'])}
-
-        return sample
-
-    def _sample_prior_predictive_full(self, formula_like, data=None,
-                                      n_iter=1000, max_terms=None,
-                                      random_state=None):
-        """Sample from the prior predictive distribution over all models.
+    def sample_parameters_posterior(self, formula_like, data=None,
+                                    n_chains=4, n_iter=1000, thin=1,
+                                    warmup=None, n_jobs=-1,
+                                    random_state=None,
+                                    generate_posterior_predictive=False):
+        """Sample parameters for model from conditional posteriors.
 
         Parameters
         ----------
         formula_like : object
-            Formula-like object describing the largest possible model
-            to be allowed, e.g., a string of the form
-            "y ~ x1 + x2 + ... + xN", where y is the outcome variable
-            to be modelled and x1, x2, ..., xN are all of the possible
-            predictors considered for inclusion in the model.
+            Formula-like object describing the terms in the given model
+            (i.e., containing only those terms present in the model, not
+            the full set of possible predictors).
 
         data : dict-like
             Data to be used in constructing the model.
 
+        n_chains : int, default: 4
+            Number of chains.
+
         n_iter : int, default: 1000
             Number of samples per chain.
 
-        max_terms : int
-            Maximum number of terms allowed in model.
+        thin : int, default: 1
+            Interval used for thinning samples.
+
+        warmup : int, optional
+            Number of warm-up samples.
 
         random_state : integer, RandomState or None
             If an integer, random_state is the seed used by the
@@ -1144,97 +1402,70 @@ class StepwiseBayesRegression():
 
         rng = check_random_state(random_state)
 
+        n_chains = rdu.check_number_of_chains(n_chains)
         n_iter = rdu.check_number_of_iterations(n_iter)
+
+        if warmup is None:
+            warmup = n_iter // 2
+        else:
+            warmup = rdu.check_warmup(warmup, n_iter)
+
+        if n_jobs is None:
+            n_jobs = -1
+        elif n_chains == 1:
+            n_jobs = 1
 
         y, X = patsy.dmatrices(formula_like, data=data)
         y, X = _check_design_matrices(y, X)
 
         outcome_names = y.design_info.column_names
 
-        lhs_terms = y.design_info.terms
-        optional_terms, optional_term_names = _get_optional_terms(
-            X.design_info.terms, term_names=X.design_info.term_names,
-            force_intercept=self.force_intercept)
-
-        n_terms = len(optional_terms)
-        max_terms = _check_max_terms(max_terms, n_terms=n_terms)
-
-        # Sample structures from uniform prior.
-        k, lp = _sample_uniform_structures_prior(
-            n_terms, max_terms=max_terms, size=n_iter, random_state=rng)
-
-        # For each sampled structure, draw from the conditional
-        # prior over parameters and outcomes.
-        sampled_outcomes = np.empty((n_iter,) + y.shape)
-        for i in range(n_iter):
-
-            model_desc = self._get_model_description(
-                k[i], lhs_terms=lhs_terms, optional_terms=optional_terms)
-
-            model_sample = self._sample_prior_predictive_fixed_model(
-                model_desc, data=data, n_iter=1, random_state=rng)
-
-            for j, n in enumerate(outcome_names):
-                sampled_outcomes[i, ..., j] = model_sample['chains'][n][0]
-
-            lp[i] += model_sample['chains']['lp__'][0]
-
-        chains = collections.OrderedDict(
-            {n: sampled_outcomes[..., i]
-             for i, n in enumerate(outcome_names)})
-        chains['k'] = k
-        chains['lp__'] = lp
-
-        args = {'random_state': random_state, 'n_iter': n_iter}
-        sample = {'chains': chains,
-                  'args': args,
-                  'mean_lp__': np.mean(chains['lp__'])}
-
-        return sample
-
-    def sample_prior_predictive(self, formula_like, data=None,
-                                fixed_model=False,
-                                n_chains=4, n_iter=1000, max_terms=None,
-                                n_jobs=-1, random_state=None):
-        """Sample from prior predictive distribution."""
-
-        rng = check_random_state(random_state)
-
-        y, X = patsy.dmatrices(formula_like, data=data)
-        y, X = _check_design_matrices(y, X)
-
-        lhs_terms = y.design_info.terms
-        optional_terms, optional_term_names = _get_optional_terms(
-            X.design_info.terms, term_names=X.design_info.term_names,
-            force_intercept=self.force_intercept)
-
-        n_chains = rdu.check_number_of_chains(n_chains)
-
         random_seeds = rng.choice(1000000 * n_chains,
                                   size=n_chains, replace=False)
 
-        if fixed_model:
-            def _sample(seed):
-                return self._sample_prior_predictive_fixed_model(
-                    formula_like, data=data, n_iter=n_iter,
-                    random_state=seed)
-        else:
-            def _sample(seed):
-                return self._sample_prior_predictive_full(
-                    formula_like, data=data, n_iter=n_iter,
-                    max_terms=max_terms, random_state=seed)
+        def _sample(seed):
+            return _sample_posterior_fixed_model(
+                formula_like, data=data, a_tau=self.a_tau, b_tau=self.b_tau,
+                nu_sq=self.nu_sq, n_iter=n_iter, thin=thin,
+                generate_posterior_predictive=generate_posterior_predictive,
+                random_state=seed)
 
         samples = Parallel(n_jobs=n_jobs)(
             delayed(_sample)(seed) for seed in random_seeds)
 
-        fit = {'samples': samples,
-               'n_chains': len(samples),
-               'n_iter': n_iter,
-               'max_terms': max_terms,
-               'random_seeds': random_seeds}
+        parameter_samples = [sample[0] for sample in samples]
 
-        if not fixed_model:
-            fit = _add_named_indicator_variables_to_fit(
-                fit, term_names=optional_term_names)
+        warmup2 = 1 + (warmup - 1) // thin
+        n_kept = 1 + (n_iter - warmup - 1) // thin
+        n_save = n_kept + warmup2
+        perm_lst = [rng.permutation(int(n_kept)) for _ in range(n_chains)]
 
-        return fit
+        posterior = {'samples': parameter_samples,
+                     'n_chains': len(samples),
+                     'n_iter': n_iter,
+                     'warmup': warmup,
+                     'thin': thin,
+                     'n_save': [n_save] * n_chains,
+                     'warmup2': [warmup2] * n_chains,
+                     'permutation': perm_lst,
+                     'random_seeds': random_seeds}
+
+        posterior_predictive = None
+        if generate_posterior_predictive:
+            generated_samples = [sample[1] for sample in samples]
+            posterior_predictive = {
+                'samples': generated_samples,
+                'n_chains': len(samples),
+                'n_iter': n_iter,
+                'warmup': warmup,
+                'thin': thin,
+                'n_save': [n_save] * n_chains,
+                'warmup2': [warmup2] * n_chains,
+                'permutation': perm_lst,
+                'random_seeds': random_seeds}
+
+        return convert_samples_dict_to_inference_data(
+            posterior=posterior,
+            posterior_predictive=posterior_predictive,
+            observed_data=data, save_warmup=True,
+            observed_data_names=outcome_names)

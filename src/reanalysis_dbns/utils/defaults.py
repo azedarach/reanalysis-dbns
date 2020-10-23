@@ -5,6 +5,11 @@ Provides default coordinate names and conventions.
 # License: MIT
 
 
+def get_default_indicator_name(predictor):
+    """Get default name for indicator variable."""
+    return 'i_{}'.format(predictor)
+
+
 def get_coordinate_standard_name(obj, coord):
     """Return standard name for coordinate.
 

@@ -10,6 +10,7 @@ import arviz as az
 import numpy as np
 import pytest
 import scipy.optimize as so
+import scipy.sparse as sa
 import scipy.special as sp
 import scipy.stats as ss
 
@@ -17,7 +18,10 @@ import reanalysis_dbns.models as rdm
 
 from reanalysis_dbns.models.sampler_diagnostics import (
     _count_model_transitions, _estimate_dirichlet_shape_parameters,
-    _invert_digamma, _sample_stationary_distributions)
+    _invert_digamma,
+    _merge_low_expected_frequency_cells, _merge_table_columns,
+    _relabel_unobserved_markov_chain_states,
+    _reorder_table_columns, _sample_stationary_distributions)
 
 
 def test_rjmcmc_rhat_single_model():
@@ -1007,3 +1011,492 @@ def test_estimate_stationary_distributions():
     assert result['ess'] < n_chains * n_iter
     assert result['n_models'] == 2
     assert result['n_observed_models'] == 2
+
+    result = rdm.estimate_stationary_distribution(
+        k, model_indicators=[0, 1, 2],
+        n_samples=n_samples, sparse=True, tolerance=1e-3,
+        min_epsilon=1e-10)
+
+    assert result['pi'].shape == (n_samples, 3)
+    row_sums = np.sum(result['pi'], axis=1)
+    mask = np.isfinite(row_sums)
+    assert np.allclose(row_sums[mask], 1.0)
+    assert result['ess'] < n_chains * n_iter
+    assert result['n_models'] == 3
+    assert result['n_observed_models'] == 2
+
+
+def test_relabel_unobserved_markov_chain_states():
+    """Test shuffling zero rows or columns."""
+
+    x = np.array([[1, 2], [3, 4]])
+    x_permuted = _relabel_unobserved_markov_chain_states(x)
+    assert np.all(x == x_permuted)
+
+    x = np.array([[1, 2],
+                  [0, 0]])
+    x_permuted = _relabel_unobserved_markov_chain_states(x)
+    expected = np.array([[1, 2],
+                         [0, 0]])
+    assert np.all(x_permuted == expected)
+
+    x = np.array([[1, 0, 2],
+                  [0, 0, 0],
+                  [5, 0, 6]])
+    x_permuted = _relabel_unobserved_markov_chain_states(x)
+    expected = np.array([[1, 2, 0],
+                         [5, 6, 0],
+                         [0, 0, 0]])
+    assert np.all(x_permuted == expected)
+
+    x = np.array([[0, 0, 0],
+                  [0, 1, 4],
+                  [0, 4, 6]])
+    x_permuted = _relabel_unobserved_markov_chain_states(x)
+    expected = np.array([[1, 4, 0],
+                         [4, 6, 0],
+                         [0, 0, 0]])
+    assert np.all(x_permuted == expected)
+
+    x = np.array([[1, 2, 0],
+                  [3, 4, 0],
+                  [0, 0, 0]])
+    x_permuted = _relabel_unobserved_markov_chain_states(x)
+    expected = np.array([[1, 2, 0],
+                         [3, 4, 0],
+                         [0, 0, 0]])
+    assert np.all(x_permuted == expected)
+
+
+def test_relabel_unobserved_markov_chain_states_sparse():
+    """Test shuffling zero rows or columns."""
+
+    x = sa.dok_matrix((3, 3))
+    x[0, 1] = 2
+    x[1, 1] = 1
+    x[1, 0] = 2
+    x = x.tocsc()
+
+    x_permuted = _relabel_unobserved_markov_chain_states(x)
+    expected = sa.dok_matrix((3, 3))
+    expected[0, 1] = 2
+    expected[1, 1] = 1
+    expected[1, 0] = 2
+    expected = expected.tocsc()
+
+    assert sa.isspmatrix_csc(x_permuted)
+    assert x_permuted.shape == expected.shape
+    assert x_permuted.nnz == expected.nnz
+    assert np.all(x_permuted.data == expected.data)
+    assert np.all(x_permuted.indices == expected.indices)
+
+    x = sa.dok_matrix((3, 3))
+    x[1, 1] = 1
+    x[1, 2] = 2
+    x[2, 1] = 3
+    x[2, 2] = 4
+    x = x.tocsr()
+
+    x_permuted = _relabel_unobserved_markov_chain_states(x)
+    expected = sa.dok_matrix((3, 3))
+    expected[0, 0] = 1
+    expected[0, 1] = 2
+    expected[1, 0] = 3
+    expected[1, 1] = 4
+    expected = expected.tocsr()
+
+    assert sa.isspmatrix_csr(x_permuted)
+    assert x_permuted.shape == expected.shape
+    assert x_permuted.nnz == expected.nnz
+    assert np.all(x_permuted.data == expected.data)
+    assert np.all(x_permuted.indices == expected.indices)
+
+    x = sa.dok_matrix((3, 3))
+    x[0, 0] = 1
+    x[0, 2] = 2
+    x[2, 0] = 3
+    x[2, 2] = 4
+    x = x.tocsr()
+
+    x_permuted = _relabel_unobserved_markov_chain_states(x)
+    expected = sa.dok_matrix((3, 3))
+    expected[0, 0] = 1
+    expected[0, 1] = 2
+    expected[1, 0] = 3
+    expected[1, 1] = 4
+    expected = expected.tocsr()
+
+    assert sa.isspmatrix_csr(x_permuted)
+    assert x_permuted.shape == expected.shape
+    assert x_permuted.nnz == expected.nnz
+    assert np.all(x_permuted.data == expected.data)
+    assert np.all(x_permuted.indices == expected.indices)
+
+
+def test_estimate_convergence_rate():
+    """Test estimation of convergence rate."""
+
+    z = np.array([[0, 0, 1, 1, 0, 1, 1, 1, 0]])
+    alpha = 2.0 / 3
+    beta = 2.0 / 5
+
+    rho = rdm.estimate_convergence_rate(z)
+    rho_expected = 1.0 - alpha - beta
+
+    assert np.abs(rho - rho_expected) < 1e-5
+
+    rho = rdm.estimate_convergence_rate(
+        z, model_indicators=np.array([0, 1, 2]))
+
+    assert np.abs(rho - rho_expected) < 1e-5
+
+
+def test_reorder_table_columns():
+    """Test reordering table columns."""
+
+    x = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+    col_order = np.array([0, 1, 2])
+    reordered_x = _reorder_table_columns(x, col_order)
+    assert np.all(x == reordered_x)
+
+    col_order = np.array([0, 2, 1])
+    reordered_x = _reorder_table_columns(x, col_order)
+    expected = np.array([[1, 3, 2], [4, 6, 5], [7, 9, 8]])
+
+    assert np.all(reordered_x == expected)
+
+    x = sa.dok_matrix((4, 4))
+    x[0, 0] = 1
+    x[0, 2] = 2
+    x[1, 1] = 3
+    x[1, 2] = 4
+    col_order = np.array([0, 2, 1, 3])
+    reordered_x = _reorder_table_columns(x, col_order)
+
+    expected = np.array([[1, 2, 0, 0],
+                         [0, 4, 3, 0],
+                         [0, 0, 0, 0],
+                         [0, 0, 0, 0]])
+
+    assert np.all(expected == reordered_x.toarray())
+
+
+def test_merge_table_columns():
+    """Test merging table columns."""
+
+    x = np.array([[6, 10, 7],
+                  [8, 6, 9],
+                  [7, 10, 9]])
+
+    cols_to_merge = []
+    merged_x = _merge_table_columns(x, cols_to_merge, 0)
+    assert np.all(x == merged_x)
+
+    cols_to_merge = [2]
+    merged_x = _merge_table_columns(x, cols_to_merge, 2)
+    assert np.all(merged_x == x)
+
+    cols_to_merge = [2]
+    merged_x = _merge_table_columns(x, cols_to_merge, 1)
+    expected = np.array([[6, 7, 10],
+                         [8, 9, 6],
+                         [7, 9, 10]])
+    assert np.all(merged_x == expected)
+
+    cols_to_merge = np.array([0, 1])
+    merged_x = _merge_table_columns(x, cols_to_merge, 0)
+    expected = np.array([[16, 7],
+                         [14, 9],
+                         [17, 9]])
+    assert np.all(merged_x == expected)
+
+    cols_to_merge = np.array([0, 1])
+    merged_x = _merge_table_columns(x, cols_to_merge, 1)
+    expected = np.array([[7, 16],
+                         [9, 14],
+                         [9, 17]])
+    assert np.all(merged_x == expected)
+
+    cols_to_merge = np.array([1, 2])
+    merged_x = _merge_table_columns(x, cols_to_merge, 1)
+    expected = np.array([[6, 17],
+                         [8, 15],
+                         [7, 19]])
+    assert np.all(merged_x == expected)
+
+    cols_to_merge = np.array([1, 2])
+    merged_x = _merge_table_columns(x, cols_to_merge, 0)
+    expected = np.array([[17, 6],
+                         [15, 8],
+                         [19, 7]])
+    assert np.all(merged_x == expected)
+
+    cols_to_merge = np.array([1, 2, 0])
+    merged_x = _merge_table_columns(x, cols_to_merge, 0)
+    expected = np.array([[23],
+                         [23],
+                         [26]])
+    assert np.all(merged_x == expected)
+
+    x = sa.dok_matrix((4, 4))
+    x[0, 0] = 1
+    x[0, 2] = 2
+    x[1, 1] = 3
+    x[2, 3] = 4
+    x[3, 1] = 5
+
+    cols_to_merge = []
+    merged_x = _merge_table_columns(x, cols_to_merge, 0)
+
+    assert np.all(x.toarray() == merged_x.toarray())
+
+    cols_to_merge = np.array([1])
+    merged_x = _merge_table_columns(x, cols_to_merge, 1)
+    assert np.all(merged_x.toarray() == x.toarray())
+
+    cols_to_merge = np.array([1])
+    merged_x = _merge_table_columns(x, cols_to_merge, 2)
+    expected = np.array([[1, 2, 0, 0],
+                         [0, 0, 3, 0],
+                         [0, 0, 0, 4],
+                         [0, 0, 5, 0]])
+    assert np.all(merged_x.toarray() == expected)
+
+    cols_to_merge = np.array([0, 1])
+    merged_x = _merge_table_columns(x, cols_to_merge, 2)
+    expected = np.array([[2, 0, 1],
+                         [0, 0, 3],
+                         [0, 4, 0],
+                         [0, 0, 5]])
+    assert np.all(merged_x.toarray() == expected)
+
+    cols_to_merge = np.array([0, 1])
+    merged_x = _merge_table_columns(x, cols_to_merge, 0)
+    expected = np.array([[1, 2, 0],
+                         [3, 0, 0],
+                         [0, 0, 4],
+                         [5, 0, 0]])
+    assert np.all(merged_x.toarray() == expected)
+
+    cols_to_merge = np.array([0, 2, 3])
+    merged_x = _merge_table_columns(x, cols_to_merge, 0)
+    expected = np.array([[3, 0],
+                         [0, 3],
+                         [4, 0],
+                         [0, 5]])
+    assert np.all(merged_x.toarray() == expected)
+
+    cols_to_merge = np.array([1, 2, 3])
+    merged_x = _merge_table_columns(x, cols_to_merge, 0)
+    expected = np.array([[2, 1],
+                         [3, 0],
+                         [4, 0],
+                         [5, 0]])
+    assert np.all(merged_x.toarray() == expected)
+
+    cols_to_merge = np.array([0, 1, 2, 3])
+    merged_x = _merge_table_columns(x, cols_to_merge, 0)
+    expected = np.array([[3],
+                         [3],
+                         [4],
+                         [5]])
+    assert np.all(merged_x == expected)
+
+
+def test_merge_low_expected_frequency_cells():
+    """Test merging columns with low expected counts."""
+
+    x = np.array([[8, 10, 9],
+                  [7, 11, 15]])
+    merged_x = _merge_low_expected_frequency_cells(x)
+    assert np.all(merged_x == x)
+
+    merged_x = _merge_low_expected_frequency_cells(
+        x, min_expected_count=10)
+    expected = np.array([[9, 18],
+                         [15, 18]])
+    assert np.all(merged_x == expected)
+
+    merged_x = _merge_low_expected_frequency_cells(
+        x, min_expected_count=20)
+    expected = np.array([[27],
+                         [33]])
+    assert np.all(merged_x == expected)
+
+    with pytest.raises(ValueError):
+        merged_x = _merge_low_expected_frequency_cells(
+            x, min_expected_count=40)
+
+    x = np.array([[0, 6, 4, 10],
+                  [3, 7, 3, 8],
+                  [1, 9, 4, 8]])
+    merged_x = _merge_low_expected_frequency_cells(x)
+    expected = np.array([[4, 6, 10],
+                         [6, 7, 8],
+                         [5, 9, 8]])
+    assert np.all(merged_x == expected)
+
+    x = np.array([[0, 0, 4, 0, 10],
+                  [0, 0, 8, 0, 11],
+                  [0, 0, 4, 0, 12]])
+    merged_x = _merge_low_expected_frequency_cells(x)
+    expected = np.array([[4, 10],
+                         [8, 11],
+                         [4, 12]])
+    assert np.all(merged_x == expected)
+
+    x = sa.dok_matrix((4, 100), dtype=int)
+    x_sampled = np.array([[7, 10, 9],
+                          [6, 7, 10],
+                          [8, 7, 10],
+                          [5, 9, 9]])
+    for i in range(x_sampled.shape[0]):
+        for j in range(x_sampled.shape[1]):
+            x[i, j] = x_sampled[i, j]
+
+    merged_x = _merge_low_expected_frequency_cells(x)
+    assert np.all(merged_x.toarray() == x_sampled)
+
+    x = sa.dok_matrix((4, 100), dtype=int)
+    x_sampled = np.array([[7, 10, 9],
+                          [6, 7, 10],
+                          [8, 7, 10],
+                          [5, 9, 9]])
+    for i in range(x_sampled.shape[0]):
+        for j in range(x_sampled.shape[1]):
+            x[i, j] = x_sampled[i, j]
+
+    x[0, 50] = 1
+    x[1, 50] = 4
+    x[2, 50] = 4
+    x[3, 50] = 3
+    x[0, 67] = 5
+    x[1, 67] = 3
+    x[2, 67] = 4
+    x[3, 67] = 3
+
+    expected = np.array([[7, 6, 10, 9],
+                         [6, 7, 7, 10],
+                         [8, 8, 7, 10],
+                         [5, 6, 9, 9]])
+    assert np.all(merged_x.toarray() == x_sampled)
+
+    x = sa.dok_matrix((3, 100000), dtype=int)
+    x[0, 1897] = 6
+    x[1, 1897] = 2
+    x[2, 1897] = 1
+    x[0, 5987] = 6
+    merged_x = _merge_low_expected_frequency_cells(x)
+    expected = np.array([[12], [2], [1]])
+    assert np.all(merged_x == expected)
+
+    with pytest.raises(ValueError):
+        merged_x = _merge_low_expected_frequency_cells(
+            x, min_expected_count=10)
+
+
+def test_rjmcmc_chisq_convergence():
+    """Test chi squared convergence test for RJMCMC output."""
+
+    z = np.array([[0, 1, 1, 0, 0, 0, 1, 1, 1, 0],
+                  [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]])
+    z = np.hstack([z, z])
+
+    test_statistic, pval = rdm.rjmcmc_chisq_convergence(
+        z, sparse=False, split=False, correction=False)
+
+    expected_table = np.array([[5, 5], [5, 5]])
+    expected_counts = (np.sum(expected_table, axis=0, keepdims=True) /
+                       expected_table.shape[0])
+    expected_test_statistic = np.sum(
+        (expected_table - expected_counts)**2 /
+        expected_counts)
+    dof = (expected_table.shape[0] - 1) * (expected_table.shape[1] - 1)
+    expected_pval = ss.chi2.sf(expected_test_statistic, dof)
+
+    assert np.abs(test_statistic - expected_test_statistic) < 1e-5
+    assert np.abs(pval - expected_pval) < 1e-5
+
+    test_statistic, pval = rdm.rjmcmc_chisq_convergence(
+        z, sparse=True, split=False, correction=False)
+
+    assert np.abs(test_statistic - expected_test_statistic) < 1e-5
+    assert np.abs(pval - expected_pval) < 1e-5
+
+    z = np.array([[0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0],
+                  [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0]])
+    z = np.hstack([z, z])
+
+    test_statistic, pval = rdm.rjmcmc_chisq_convergence(
+        z, sparse=False, split=True, correction=False)
+
+    expected_table = np.array([[7, 5],
+                               [7, 5],
+                               [6, 6],
+                               [6, 6]])
+    expected_counts = (np.sum(expected_table, axis=0, keepdims=True) /
+                       expected_table.shape[0])
+    expected_test_statistic = np.sum(
+        (expected_table - expected_counts)**2 /
+        expected_counts)
+    dof = (expected_table.shape[0] - 1) * (expected_table.shape[1] - 1)
+    expected_pval = ss.chi2.sf(expected_test_statistic, dof)
+
+    assert np.abs(test_statistic - expected_test_statistic) < 1e-5
+    assert np.abs(pval - expected_pval) < 1e-5
+
+    test_statistic, pval = rdm.rjmcmc_chisq_convergence(
+        z, sparse=False, split=True, correction=False)
+
+    assert np.abs(test_statistic - expected_test_statistic) < 1e-5
+    assert np.abs(pval - expected_pval) < 1e-5
+
+    test_statistic, pval = rdm.rjmcmc_chisq_convergence(
+        z, sparse=True, split=True, correction=False,
+        use_likelihood_ratio=True)
+
+    expected_test_statistic = 2 * np.sum(
+        expected_table * np.log(expected_table / expected_counts))
+
+    assert np.abs(test_statistic - expected_test_statistic) < 1e-5
+
+
+def test_rjmcmc_kstest_convergence():
+    """Test KS convergence test for RJMCMC output."""
+
+    z = np.array([[0, 1, 1, 0, 0, 0, 1, 1, 1, 0],
+                  [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]])
+    z_full = np.hstack([z, z])
+
+    test_statistic, pval = rdm.rjmcmc_kstest_convergence(
+        z_full, split=False)
+
+    expected_test_statistic, expected_pval = ss.ks_2samp(z[0], z[1])
+
+    assert np.abs(test_statistic[0] - expected_test_statistic) < 1e-6
+    assert np.abs(pval[0] - expected_pval) < 1e-6
+
+    test_statistic, pval = rdm.rjmcmc_kstest_convergence(
+        z_full, split=True)
+
+    assert np.abs(test_statistic[0] - expected_test_statistic) < 1e-6
+    assert np.abs(pval[0] - expected_pval) < 1e-6
+
+    z = np.array([[0, 1, 1, 0, 0, 0, 1, 1, 1, 0],
+                  [0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+                  [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]])
+    z_full = np.hstack([z, z])
+
+    test_statistic, pval = rdm.rjmcmc_kstest_convergence(
+        z_full, split=False)
+
+    t01, p01 = ss.ks_2samp(z[0], z[1], mode='auto')
+    t02, p02 = ss.ks_2samp(z[0], z[2], mode='auto')
+    t12, p12 = ss.ks_2samp(z[1], z[2], mode='auto')
+
+    assert np.abs(test_statistic[0] - t01) < 1e-6
+    assert np.abs(test_statistic[1] - t02) < 1e-6
+    assert np.abs(test_statistic[2] - t12) < 1e-6
+    assert np.abs(pval[0] - p01) < 1e-6
+    assert np.abs(pval[1] - p02) < 1e-6
+    assert np.abs(pval[2] - p12) < 1e-6

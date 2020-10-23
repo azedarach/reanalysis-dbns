@@ -15,6 +15,24 @@ import pandas as pd
 import reanalysis_dbns.utils as rdu
 
 
+def check_max_nonzero_indicators(max_nonzero, n_indicators):
+    """Check maximum number of non-zero indicators is valid."""
+
+    if max_nonzero is None:
+        max_nonzero = n_indicators
+
+    invalid_max_nonzero = (not rdu.is_integer(max_nonzero) or
+                           max_nonzero < 0 or
+                           max_nonzero > n_indicators)
+    if invalid_max_nonzero:
+        raise ValueError(
+            'Maximum number of non-zero indicators must be an integer '
+            'between 0 and %d '
+            '(got max_nonzero=%r)' % (n_indicators, max_nonzero))
+
+    return max_nonzero
+
+
 def get_indicator_set_neighborhood(k, allow_exchanges=True,
                                    max_nonzero=None,
                                    include_current_set=False):
@@ -163,107 +181,278 @@ def get_sample_summary_statistics(var_values, probs=None):
     return pd.DataFrame(data_vars)
 
 
-def get_log_likelihood_data(fit):
-    """Get log-likelihood group from fit for writing to file."""
+def _get_number_of_warmup_and_kept_draws_from_fit(fit):
+    """Get number of warmup draws and kept draws."""
+
+    if 'warmup2' not in fit:
+        n_warmup = 0
+        n_draws = fit['n_save'][0]
+    else:
+        n_warmup = fit['warmup2'][0]
+        n_draws = fit['n_save'][0] - fit['warmup2'][0]
+
+    return n_warmup, n_draws
+
+
+def _get_log_likelihood_values(fit, n_draws, is_warmup=False):
+    """Get values of log-likelihood."""
 
     n_chains = len(fit['samples'])
-    n_iter = fit['n_iter']
-    thin = fit['thin']
-    n_draws = n_iter // thin
 
     if 'log_likelihood' in fit['samples'][0]['chains']:
         log_likelihood = {'log_likelihood': np.empty((n_chains, n_draws))}
         for i in range(n_chains):
-            log_likelihood['log_likelihood'][i] = \
-                fit['samples'][i]['chains']['log_likelihood'].copy()
+            if is_warmup:
+                log_likelihood['log_likelihood'][i] = \
+                    fit['samples'][i]['chains']['log_likelihood'][:n_draws]
+            else:
+                log_likelihood['log_likelihood'][i] = \
+                    fit['samples'][i]['chains']['log_likelihood'][-n_draws:]
     else:
         log_likelihood = None
 
     return log_likelihood
 
 
-def get_sample_stats_data(fit):
-    """Get sample statistics group from fit for writing to file."""
+def get_log_likelihood_data(fit):
+    """Get log-likelihood group from fit for writing to file."""
+
+    if fit is None:
+        return None
+
+    n_warmup, n_draws = _get_number_of_warmup_and_kept_draws_from_fit(fit)
+
+    if n_warmup > 0:
+        warmup_log_likelihood = _get_log_likelihood_values(
+            fit, n_warmup, is_warmup=True)
+    else:
+        warmup_log_likelihood = None
+
+    log_likelihood = _get_log_likelihood_values(
+        fit, n_draws, is_warmup=False)
+
+    return log_likelihood, warmup_log_likelihood
+
+
+def _get_sample_stats_values(fit, n_draws, is_warmup=False):
+    """Get values of sample statistics."""
 
     n_chains = len(fit['samples'])
-    n_iter = fit['n_iter']
-    thin = fit['thin']
-    n_draws = n_iter // thin
 
     accept_stat = np.empty((n_chains, n_draws))
     lp = np.empty((n_chains, n_draws))
     for i in range(n_chains):
-        accept_stat[i] = fit['samples'][i]['accept_stat'].copy()
-        lp[i] = fit['samples'][i]['chains']['lp__'].copy()
+        if is_warmup:
+            accept_stat[i] = fit['samples'][i]['accept_stat'][:n_draws]
+            lp[i] = fit['samples'][i]['chains']['lp__'][:n_draws]
+        else:
+            accept_stat[i] = fit['samples'][i]['accept_stat'][-n_draws:]
+            lp[i] = fit['samples'][i]['chains']['lp__'][-n_draws:]
 
     sample_stats = {'accept_stat': accept_stat, 'lp': lp}
+
     if 'log_marginal_likelihood' in fit['samples'][0]['chains']:
         sample_stats['log_marginal_likelihood'] = np.empty(
             (n_chains, n_draws))
         for i in range(n_chains):
-            sample_stats['log_marginal_likelihood'][i] = \
-                fit['samples'][i]['chains'][
-                    'log_marginal_likelihood'].copy()
+            if is_warmup:
+                sample_stats['log_marginal_likelihood'][i] = \
+                    fit['samples'][i]['chains'][
+                        'log_marginal_likelihood'][:n_draws]
+            else:
+                sample_stats['log_marginal_likelihood'][i] = \
+                    fit['samples'][i]['chains'][
+                        'log_marginal_likelihood'][-n_draws:]
 
     return sample_stats
 
 
-def get_mc3_posterior_data(fit):
-    """Get posterior group data from fit."""
+def get_sample_stats_data(fit):
+    """Get sample statistics group from fit for writing to file."""
+
+    if fit is None:
+        return None
+
+    n_warmup, n_draws = _get_number_of_warmup_and_kept_draws_from_fit(fit)
+
+    if n_warmup > 0:
+        warmup_sample_stats = _get_sample_stats_values(
+            fit, n_warmup, is_warmup=True)
+    else:
+        warmup_sample_stats = None
+
+    sample_stats = _get_sample_stats_values(fit, n_draws, is_warmup=False)
+
+    return sample_stats, warmup_sample_stats
+
+
+def _get_sampled_parameter_values(fit, n_draws, is_warmup=False):
+    """Get sampled parameter values."""
+
+    excluded_vars = ('lp__', 'log_marginal_likelihood')
 
     n_chains = len(fit['samples'])
-    n_iter = fit['n_iter']
-    thin = fit['thin']
-    n_draws = n_iter // thin
 
-    n_indicators = fit['samples'][0]['chains']['k'].shape[1]
-
-    k = np.empty((n_chains, n_draws, n_indicators), dtype='i8')
-    extra_pars = {}
+    draws = {}
     for p in fit['samples'][0]['chains']:
-        if p == 'lp__':
+        if p in excluded_vars:
             continue
 
         if fit['samples'][0]['chains'][p].ndim > 1:
             p_shape = fit['samples'][0]['chains'][p][0].shape
         else:
-            p_shape = []
+            p_shape = ()
 
-        extra_pars[p] = np.empty([n_chains, n_draws] + p_shape)
+        draws[p] = np.empty((n_chains, n_draws) + p_shape)
 
     for i in range(n_chains):
-        k[i] = fit['samples'][i]['chains']['k'].copy()
-        for p in extra_pars:
-            extra_pars[p][i] = fit['samples'][i]['chains'][p].copy()
+        for p in draws:
+            if is_warmup:
+                draws[p][i] = fit['samples'][i]['chains'][p][:n_draws]
+            else:
+                draws[p][i] = fit['samples'][i]['chains'][p][-n_draws:]
 
-    posterior = {'k': k}
-    coords = {'indicator': np.arange(n_indicators)}
-    dims = {'k': ['indicator']}
+    return draws
 
-    for p in extra_pars:
-        posterior[p] = extra_pars[p]
 
-        if extra_pars[p].ndim > 2:
-            extra_dims = extra_pars[p].shape[2:]
+def get_sampled_parameters_data(fit, coords=None, dims=None):
+    """Get posterior group data from fit."""
+
+    if fit is None:
+        return None
+
+    n_warmup, n_draws = _get_number_of_warmup_and_kept_draws_from_fit(fit)
+
+    if n_warmup > 0:
+        warmup_draws = _get_sampled_parameter_values(
+            fit, n_warmup, is_warmup=True)
+    else:
+        warmup_draws = None
+
+    draws = _get_sampled_parameter_values(fit, n_draws, is_warmup=False)
+
+    if coords is None:
+        coords = {}
+
+    if dims is None:
+        dims = {}
+
+    for p in draws:
+
+        if draws[p].ndim > 2:
+            extra_dims = draws[p].shape[2:]
             n_extra_dims = len(extra_dims)
-            for i, d in enumerate(extra_dims):
-                coords['{}_dim_{:d}'.format(p, i)] = np.arange(d)
-            dims[p] = ['{}_dim_{:d}'.format(p, i) for i in range(n_extra_dims)]
 
-    return posterior, coords, dims
+            if p not in coords:
+                for i, d in enumerate(extra_dims):
+                    coords['{}_dim_{:d}'.format(p, i)] = np.arange(d)
+
+            if p not in dims:
+                dims[p] = ['{}_dim_{:d}'.format(p, i)
+                           for i in range(n_extra_dims)]
+
+    return draws, warmup_draws, coords, dims
 
 
-def write_stepwise_mc3_samples(fit, sample_file, data=None):
-    """Write MC3 samples to file."""
+def get_observed_data(data, names=None, dims=None, coords=None):
+    """Get observed data group."""
 
-    posterior, coords, dims = get_mc3_posterior_data(fit)
-    sample_stats = get_sample_stats_data(fit)
-    log_likelihood = get_log_likelihood_data(fit)
+    if data is None:
+        return None
+
+    observed_data = {}
+
+    if names is None:
+        names = [n for n in data]
+
+    if dims is None:
+        dims = {}
+
+    if coords is None:
+        coords = {}
+
+    for n in names:
+        observed_data[n] = data[n]
+
+        if np.ndim(data[n]) > 0:
+
+            data_dims = np.shape(data[n])
+            n_dims = len(data_dims)
+
+            if n not in coords:
+                for i, d in enumerate(data_dims):
+                    coords['{}_dim_{:d}'.format(n, i)] = np.arange(d)
+
+            if n not in dims:
+                dims[n] = ['{}_dim_{:d}'.format(n, i)
+                           for i in range(n_dims)]
+
+    return observed_data, coords, dims
+
+
+def convert_samples_dict_to_inference_data(posterior=None, prior=None,
+                                           posterior_predictive=None,
+                                           prior_predictive=None,
+                                           observed_data=None, coords=None,
+                                           dims=None,
+                                           observed_data_names=None,
+                                           save_warmup=False):
+    """Convert a dictionary containing sampling results to InferenceData."""
+
+    warmup_posterior = None
+    sample_stats = None
+    warmup_sample_stats = None
+    log_likelihood = None
+    warmup_log_likelihood = None
+
+    if posterior is not None:
+        sample_stats, warmup_sample_stats = get_sample_stats_data(posterior)
+        log_likelihood, warmup_log_likelihood = get_log_likelihood_data(
+            posterior)
+        posterior, warmup_posterior, coords, dims = \
+            get_sampled_parameters_data(
+                posterior, coords=coords, dims=dims)
+
+    warmup_posterior_predictive = None
+    if posterior_predictive is not None:
+        posterior_predictive, warmup_posterior_predictive, coords, dims = \
+            get_sampled_parameters_data(
+                posterior_predictive, coords=coords, dims=dims)
+
+    if prior is not None:
+        prior, _, coords, dims = get_sampled_parameters_data(
+            prior, coords=coords, dims=dims)
+
+    if prior_predictive is not None:
+        prior_predictive, _, coords, dims = \
+            get_sampled_parameters_data(
+                prior_predictive, coords=coords, dims=dims)
+
+    if observed_data is not None:
+        observed_data, coords, dims = get_observed_data(
+            observed_data, names=observed_data_names,
+            coords=coords, dims=dims)
 
     samples = az.from_dict(
-        posterior,
+        posterior=posterior,
+        warmup_posterior=warmup_posterior,
+        warmup_posterior_predictive=warmup_posterior_predictive,
+        posterior_predictive=posterior_predictive,
+        prior=prior,
+        prior_predictive=prior_predictive,
         log_likelihood=log_likelihood,
+        warmup_log_likelihood=warmup_log_likelihood,
         sample_stats=sample_stats,
-        coords=coords, dims=dims)
+        observed_data=observed_data,
+        coords=coords, dims=dims, save_warmup=save_warmup)
+
+    return samples
+
+
+def write_stepwise_mc3_samples(sample_file, **kwargs):
+    """Write MC3 samples to file."""
+
+    samples = convert_samples_dict_to_inference_data(
+        **kwargs)
 
     samples.to_netcdf(sample_file)

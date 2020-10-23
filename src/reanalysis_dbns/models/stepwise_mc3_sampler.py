@@ -10,13 +10,54 @@ import collections
 import time
 
 import numpy as np
+import scipy.special as sp
 
 from joblib import Parallel, delayed
 from sklearn.utils import check_random_state
 
 import reanalysis_dbns.utils as rdu
 
-from .sampler_helpers import get_indicator_set_neighborhood
+from .sampler_helpers import (check_max_nonzero_indicators,
+                              get_indicator_set_neighborhood)
+
+
+def _initialize_stepwise_mc3_random(n_indicators, n_chains=1,
+                                    max_nonzero=None, random_state=None):
+    """Get initial state for MC3 sampler."""
+
+    rng = check_random_state(random_state)
+
+    initial_k = np.zeros((n_chains, n_indicators), dtype=int)
+
+    max_nonzero = check_max_nonzero_indicators(
+        max_nonzero, n_indicators=n_indicators)
+
+    # Draw initial set of terms uniformly from possible sets of
+    # terms.
+    n_possible_sets = np.sum([sp.comb(n_indicators, k)
+                              for k in range(max_nonzero + 1)])
+    weights = np.array([sp.comb(n_indicators, k) / n_possible_sets
+                        for k in range(max_nonzero + 1)])
+
+    for i in range(n_chains):
+
+        indicator_set_size = rng.choice(max_nonzero + 1, p=weights)
+        indicator_indices = rng.choice(
+            n_indicators, size=indicator_set_size, replace=False)
+
+        initial_k[i, indicator_indices] = 1
+
+    return initial_k
+
+
+def initialize_stepwise_mc3(n_indicators, method='random', **kwargs):
+    """Draw initial values for indicator set in MC3 sampling."""
+
+    if method == 'random':
+        return _initialize_stepwise_mc3_random(n_indicators, **kwargs)
+
+    raise ValueError(
+        "Unrecognized initialization method '%r'" % method)
 
 
 def stepwise_mc3_propose_model(k, max_nonzero=None, allow_exchanges=True,

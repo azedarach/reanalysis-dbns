@@ -6,6 +6,7 @@ install_requires = [
     'arviz',
     'dask',
     'joblib',
+    'loky',
     'netCDF4',
     'numpy',
     'pandas',
