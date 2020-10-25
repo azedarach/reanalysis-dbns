@@ -594,7 +594,6 @@ def _get_structure_samples_posterior_predictive(fit, formula_like, data=None,
     max_nonzero = fit['max_nonzero']
     allow_exchanges = fit['samples'][0]['args']['allow_exchanges']
     n_chains = len(fit['samples'])
-    n_iter = fit['n_iter']
     n_save = fit['n_save']
     thin = fit['thin']
 
@@ -760,7 +759,6 @@ def _sample_posterior_full(formula_like, data=None,
     y, X = patsy.dmatrices(formula_like, data=data)
     y, X = _check_design_matrices(y, X)
 
-    lhs_terms = y.design_info.terms
     outcome_names = y.design_info.column_names
     optional_terms, optional_term_names = _get_optional_terms(
         X.design_info.terms, term_names=X.design_info.term_names,
@@ -1435,9 +1433,9 @@ class StepwiseBayesRegression():
 
         parameter_samples = [sample[0] for sample in samples]
 
-        warmup2 = 1 + (warmup - 1) // thin
-        n_kept = 1 + (n_iter - warmup - 1) // thin
-        n_save = n_kept + warmup2
+        warmup2 = warmup // thin
+        n_save = 1 + (n_iter - 1) // thin
+        n_kept = n_save - warmup2
         perm_lst = [rng.permutation(int(n_kept)) for _ in range(n_chains)]
 
         posterior = {'samples': parameter_samples,

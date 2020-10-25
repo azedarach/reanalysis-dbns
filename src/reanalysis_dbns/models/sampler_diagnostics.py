@@ -1439,7 +1439,10 @@ def rjmcmc_batch_kstest_convergence(k, batch_size=None, thin=1,
         batch_size = int((n_iter // 2) // 20)
 
     n_batches = int(np.ceil((n_iter // 2) / batch_size))
-    n_comparisons = n_chains * (n_chains - 1) // 2
+    if split:
+        n_comparisons = n_chains * (2 * n_chains - 1)
+    else:
+        n_comparisons = n_chains * (n_chains - 1) // 2
 
     test_statistics = np.zeros((n_batches, n_comparisons))
     pvals = np.zeros((n_batches, n_comparisons))

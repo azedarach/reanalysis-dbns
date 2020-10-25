@@ -771,7 +771,7 @@ generated quantities {
             'a_tau': a_tau, 'b_tau': b_tau, 'nu_sq': nu_sq}
 
     n_chains = 4
-    n_iter = 10000
+    n_iter = 20000
     sm = ps.StanModel(model_code=model_code)
     hmc_fit = sm.sampling(data=data, iter=n_iter, chains=n_chains, n_jobs=1)
 
@@ -794,7 +794,7 @@ generated quantities {
                 hmc_post_y_cov[i, t1, t2] = np.cov(np.vstack([y1, y2]))[0, 1]
 
     assert np.all(
-        np.abs((post_y_mean - hmc_post_y_mean)) < 0.05)
+        np.abs((post_y_mean - hmc_post_y_mean)) < 0.1)
     assert np.all(
         np.abs((post_y_cov - hmc_post_y_cov)) < 0.5)
 
@@ -893,7 +893,7 @@ generated quantities {
             'a_tau': a_tau, 'b_tau': b_tau, 'nu_sq': nu_sq}
 
     n_chains = 4
-    n_iter = 10000
+    n_iter = 20000
     sm = ps.StanModel(model_code=model_code)
     hmc_fit = sm.sampling(data=data, iter=n_iter, chains=n_chains, n_jobs=1)
 
