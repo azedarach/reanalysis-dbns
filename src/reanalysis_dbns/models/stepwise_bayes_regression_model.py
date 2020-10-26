@@ -892,18 +892,16 @@ def _get_model_indicators(sample_ds, only_sampled_models=True,
 
 
 def structure_sample_convergence_rate(sample_ds, max_nonzero=None,
-                                      only_sampled_models=False,
-                                      indicator_var='k', sparse=False,
+                                      indicator_var='k', sparse=True,
                                       combine_chains=False):
     """Estimate convergence rate for structure chains."""
 
     z, model_indicators = _get_model_indicators(
         sample_ds, max_nonzero=max_nonzero,
-        only_sampled_models=only_sampled_models,
+        only_sampled_models=True,
         indicator_var=indicator_var)
 
-    return estimate_convergence_rate(z, model_indicators=model_indicators,
-                                     sparse=sparse,
+    return estimate_convergence_rate(z, sparse=sparse,
                                      combine_chains=combine_chains)
 
 

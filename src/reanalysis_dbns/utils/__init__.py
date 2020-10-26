@@ -16,6 +16,10 @@ from .defaults import (get_coordinate_standard_name,
                        get_default_indicator_name, get_lat_name,
                        get_level_name, get_lon_name, get_time_name)
 from .eofs import (eofs, reofs)
+from .preprocessing import (construct_lagged_data,
+                            get_offset_variable_name,
+                            remove_polynomial_trend,
+                            standardize_time_series)
 from .time_helpers import datetime_to_string
 from .validation import (check_array_shape, check_base_period,
                          check_fixed_missing_values,
@@ -46,6 +50,7 @@ __all__ = [
     'check_number_of_iterations',
     'check_tolerance',
     'check_warmup',
+    'construct_lagged_data',
     'datetime_to_string',
     'detect_frequency',
     'downsample_data',
@@ -57,6 +62,7 @@ __all__ = [
     'get_lat_name',
     'get_level_name',
     'get_lon_name',
+    'get_offset_variable_name',
     'get_time_name',
     'get_valid_variables',
     'has_fixed_missing_values',
@@ -74,11 +80,13 @@ __all__ = [
     'meridional_mean',
     'pattern_correlation',
     'remove_missing_features',
+    'remove_polynomial_trend',
     'restore_missing_features',
     'reofs',
     'select_lat_band',
     'select_latlon_box',
     'select_lon_band',
     'standardized_anomalies',
+    'standardize_time_series',
     'zonal_mean'
 ]

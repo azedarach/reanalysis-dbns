@@ -885,7 +885,11 @@ def estimate_convergence_rate(k, model_indicators=None, sparse=False,
 
     convergence_rates = []
     for p in transition_matrices:
-        evals = sl.eigvals(p)
+        if sparse:
+            evals = sa.linalg.eigs(p, which='LR',
+                                   return_eigenvectors=False)
+        else:
+            evals = sl.eigvals(p)
 
         if evals.shape[0] < 2:
             raise ValueError(
