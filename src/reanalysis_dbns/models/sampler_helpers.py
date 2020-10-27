@@ -393,9 +393,12 @@ def get_observed_data(data, names=None, dims=None, coords=None):
 def convert_samples_dict_to_inference_data(posterior=None, prior=None,
                                            posterior_predictive=None,
                                            prior_predictive=None,
-                                           observed_data=None, coords=None,
+                                           observed_data=None,
+                                           constant_data=None,
+                                           coords=None,
                                            dims=None,
                                            observed_data_names=None,
+                                           constant_data_names=None,
                                            save_warmup=False):
     """Convert a dictionary containing sampling results to InferenceData."""
 
@@ -433,6 +436,11 @@ def convert_samples_dict_to_inference_data(posterior=None, prior=None,
             observed_data, names=observed_data_names,
             coords=coords, dims=dims)
 
+    if constant_data is not None:
+        constant_data, coords, dims = get_observed_data(
+            constant_data, names=constant_data_names,
+            coords=coords, dims=dims)
+
     samples = az.from_dict(
         posterior=posterior,
         warmup_posterior=warmup_posterior,
@@ -444,6 +452,7 @@ def convert_samples_dict_to_inference_data(posterior=None, prior=None,
         warmup_log_likelihood=warmup_log_likelihood,
         sample_stats=sample_stats,
         observed_data=observed_data,
+        constant_data=constant_data,
         coords=coords, dims=dims, save_warmup=save_warmup)
 
     return samples

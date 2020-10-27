@@ -764,6 +764,10 @@ def _sample_posterior_full(formula_like, data=None,
         X.design_info.terms, term_names=X.design_info.term_names,
         force_intercept=force_intercept)
 
+    constant_data_names = None
+    if data is not None:
+        constant_data_names = [n for n in data if n not in outcome_names]
+
     n_terms = len(optional_terms)
     n_chains = rdu.check_number_of_chains(n_chains)
 
@@ -815,8 +819,10 @@ def _sample_posterior_full(formula_like, data=None,
 
     return convert_samples_dict_to_inference_data(
         posterior=fit, posterior_predictive=posterior_predictive,
-        observed_data=data, save_warmup=True,
-        observed_data_names=outcome_names, coords=coords, dims=dims)
+        observed_data=data, constant_data=data, save_warmup=True,
+        observed_data_names=outcome_names,
+        constant_data_names=constant_data_names,
+        coords=coords, dims=dims)
 
 
 def _unique_models(sample_ds, indicator_var='k'):
@@ -1166,6 +1172,11 @@ class StepwiseBayesRegression():
                 formula_like, data=data,
                 force_intercept=self.force_intercept)
 
+        constant_data_names = None
+        if data is not None:
+            constant_data_names = [n for n in data
+                                   if n not in outcome_names]
+
         n_chains = rdu.check_number_of_chains(n_chains)
         n_iter = rdu.check_number_of_iterations(n_iter)
 
@@ -1210,8 +1221,9 @@ class StepwiseBayesRegression():
         return convert_samples_dict_to_inference_data(
             prior=prior,
             prior_predictive=prior_predictive,
-            observed_data=data, save_warmup=True,
-            observed_data_names=outcome_names)
+            observed_data=data, constant_data=data, save_warmup=True,
+            observed_data_names=outcome_names,
+            constant_data_names=constant_data_names)
 
     def sample_parameters_prior(self, formula_like, data=None, n_chains=4,
                                 n_iter=1000, n_jobs=-1,  random_state=None,
@@ -1262,6 +1274,10 @@ class StepwiseBayesRegression():
 
         outcome_names = y.design_info.column_names
 
+        constant_data_names = None
+        if data is not None:
+            constant_data_names = [n for n in data if n not in outcome_names]
+
         random_seeds = rng.choice(1000000 * n_chains,
                                   size=n_chains, replace=False)
 
@@ -1296,8 +1312,9 @@ class StepwiseBayesRegression():
         return convert_samples_dict_to_inference_data(
             prior=prior,
             prior_predictive=prior_predictive,
-            observed_data=data, save_warmup=True,
-            observed_data_names=outcome_names)
+            observed_data=data, constant_data=data, save_warmup=True,
+            observed_data_names=outcome_names,
+            constant_data_names=constant_data_names)
 
     def sample_structures_posterior(self, formula_like, data=None,
                                     max_terms=None,
@@ -1416,6 +1433,10 @@ class StepwiseBayesRegression():
 
         outcome_names = y.design_info.column_names
 
+        constant_data_names = None
+        if data is not None:
+            constant_data_names = [n for n in data if n not in outcome_names]
+
         random_seeds = rng.choice(1000000 * n_chains,
                                   size=n_chains, replace=False)
 
@@ -1463,5 +1484,6 @@ class StepwiseBayesRegression():
         return convert_samples_dict_to_inference_data(
             posterior=posterior,
             posterior_predictive=posterior_predictive,
-            observed_data=data, save_warmup=True,
-            observed_data_names=outcome_names)
+            observed_data=data, constant_data=data, save_warmup=True,
+            observed_data_names=outcome_names,
+            constant_data_names=constant_data_names)
