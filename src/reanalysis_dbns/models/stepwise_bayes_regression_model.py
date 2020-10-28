@@ -476,7 +476,8 @@ def _sample_prior_fixed_model(formula_like, data=None,
     y, X = _check_design_matrices(y, X)
 
     outcome_names = y.design_info.column_names
-    coef_names = X.design_info.column_names
+    coef_names = [rdu.get_default_coefficient_name(n)
+                  for n in X.design_info.column_names]
     n_coefs = len(coef_names)
 
     beta, tau_sq, lp = _sample_parameters_conjugate_priors(
@@ -530,7 +531,8 @@ def _sample_posterior_fixed_model(formula_like, data=None,
     y, X = _check_design_matrices(y, X)
 
     outcome_names = y.design_info.column_names
-    coef_names = X.design_info.column_names
+    coef_names = [rdu.get_default_coefficient_name(n)
+                  for n in X.design_info.column_names]
 
     beta, tau_sq, lp = _sample_parameters_posterior(
         y, X, a_tau=a_tau, b_tau=b_tau, nu_sq=nu_sq,

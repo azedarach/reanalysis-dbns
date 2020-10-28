@@ -132,10 +132,12 @@ def test_sample_parameters_prior():
     for i in range(n_chains):
         chain = prior_samples.prior.isel(chain=i)
         assert np.abs(np.mean(chain['tau_sq']) - expected_mean_tau_sq) < 0.05
-        assert np.abs(np.mean(chain['Intercept']) - expected_mean_beta) < 0.05
-        assert np.abs(np.std(chain['Intercept']) - expected_std_beta) < 0.05
-        assert np.abs(np.mean(chain['x']) - expected_mean_beta) < 0.05
-        assert np.abs(np.std(chain['x']) - expected_std_beta) < 0.05
+        assert (np.abs(
+            np.mean(chain['beta_Intercept']) - expected_mean_beta) < 0.05)
+        assert (np.abs(
+            np.std(chain['beta_Intercept']) - expected_std_beta) < 0.05)
+        assert np.abs(np.mean(chain['beta_x']) - expected_mean_beta) < 0.05
+        assert np.abs(np.std(chain['beta_x']) - expected_std_beta) < 0.05
 
 
 def test_sample_parameters_posterior():
@@ -184,9 +186,9 @@ def test_sample_parameters_posterior():
     for i in range(n_chains):
         chain = fit.posterior.isel(chain=i)
         intercept_samples[i * n_kept:(i + 1) * n_kept] = \
-            chain['Intercept'].data
+            chain['beta_Intercept'].data
         predictor_samples[i * n_kept:(i + 1) * n_kept] = \
-            chain['x'].data
+            chain['beta_x'].data
         precision_samples[i * n_kept:(i + 1) * n_kept] = \
             chain['tau_sq'].data
 
@@ -339,9 +341,10 @@ def test_prior_predictive_checks_fixed_model():
         assert (np.abs(
             np.mean(prior_chain['tau_sq']) - expected_mean_tau_sq) < 0.1)
         assert (np.abs(
-            np.mean(prior_chain['Intercept']) - expected_mean_beta) < 0.1)
+            np.mean(
+                prior_chain['beta_Intercept']) - expected_mean_beta) < 0.1)
         assert (np.abs(
-            np.std(prior_chain['Intercept']) - expected_std_beta) < 0.1)
+            np.std(prior_chain['beta_Intercept']) - expected_std_beta) < 0.1)
 
         assert np.all(np.abs(np.mean(prior_pred_chain['y'], axis=0)) < 0.1)
 
@@ -372,22 +375,23 @@ def test_prior_predictive_checks_fixed_model():
 
         assert 'y' in prior_pred_chain
         assert 'tau_sq' in prior_chain
-        assert 'x1' in prior_chain
+        assert 'beta_x1' in prior_chain
 
         assert prior_pred_chain['y'].shape == (n_iter, n_samples)
         assert prior_chain['tau_sq'].shape == (n_iter,)
-        assert prior_chain['x1'].shape == (n_iter,)
+        assert prior_chain['beta_x1'].shape == (n_iter,)
 
         assert (np.abs(
             np.mean(prior_chain['tau_sq']) - expected_mean_tau_sq) < 0.1)
         assert (np.abs(
-            np.mean(prior_chain['Intercept']) - expected_mean_beta) < 0.1)
+            np.mean(
+                prior_chain['beta_Intercept']) - expected_mean_beta) < 0.1)
         assert (np.abs(
-            np.std(prior_chain['Intercept']) - expected_std_beta) < 0.1)
+            np.std(prior_chain['beta_Intercept']) - expected_std_beta) < 0.1)
         assert (np.abs(
-            np.mean(prior_chain['x1']) - expected_mean_beta) < 0.1)
+            np.mean(prior_chain['beta_x1']) - expected_mean_beta) < 0.1)
         assert (np.abs(
-            np.std(prior_chain['x1']) - expected_std_beta) < 0.1)
+            np.std(prior_chain['beta_x1']) - expected_std_beta) < 0.1)
 
         assert np.all(np.abs(np.mean(prior_pred_chain['y'], axis=0)) < 0.1)
 

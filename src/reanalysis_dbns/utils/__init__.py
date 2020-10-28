@@ -13,6 +13,7 @@ from .computation import (calc_truncated_svd, downsample_data,
                           select_latlon_box, select_lon_band,
                           standardized_anomalies, zonal_mean)
 from .defaults import (get_coordinate_standard_name,
+                       get_default_coefficient_name,
                        get_default_indicator_name, get_lat_name,
                        get_level_name, get_lon_name, get_time_name)
 from .eofs import (eofs, reofs)
@@ -58,6 +59,7 @@ __all__ = [
     'ensure_variables_in_data',
     'eofs',
     'get_coordinate_standard_name',
+    'get_default_coefficient_name',
     'get_default_indicator_name',
     'get_lat_name',
     'get_level_name',
