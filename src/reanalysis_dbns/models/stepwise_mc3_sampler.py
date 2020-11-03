@@ -529,8 +529,8 @@ def sample_stepwise_mc3(initial_k, logp, *logp_args, data=None,
     samples = Parallel(n_jobs=n_jobs)(
         delayed(_sample)(i, seed) for i, seed in enumerate(random_seeds))
 
-    warmup2 = warmup // thin
-    n_save = 1 + (n_iter - 1) // thin
+    warmup2 = 1 + warmup // thin
+    n_save = (n_iter - 1) // thin
     n_kept = n_save - warmup2
     perm_lst = [rng.permutation(int(n_kept)) for _ in range(n_chains)]
 
