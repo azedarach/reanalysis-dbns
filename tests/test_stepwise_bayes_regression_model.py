@@ -569,7 +569,7 @@ def test_stepwise_bayes_regression_stepwise_mc3_single_predictor():
         thin=thin, n_jobs=n_jobs, random_state=random_state)
 
     assert fit.posterior.sizes['chain'] == n_chains
-    assert fit.posterior.sizes['draw'] == 250
+    assert fit.posterior.sizes['draw'] == 249
 
     n_kept = fit.posterior.sizes['draw']
 
@@ -637,7 +637,7 @@ def test_stepwise_bayes_regression_stepwise_mc3_two_predictors():
         max_terms=1)
 
     assert fit.posterior.sizes['chain'] == n_chains
-    assert fit.posterior.sizes['draw'] == 250
+    assert fit.posterior.sizes['draw'] == 249
 
     n_kept = fit.posterior.sizes['draw']
 
@@ -965,7 +965,7 @@ def test_posterior_predictive_checks():
     possible_models = [np.array([0, 0]), np.array([1, 0]),
                        np.array([0, 1]), np.array([1, 1])]
     n_possible_models = len(possible_models)
-    n_kept = n_iter - warmup
+    n_kept = n_iter - warmup - 1
     for i in range(n_chains):
 
         posterior_chain = posterior_samples.posterior.isel(chain=i)
