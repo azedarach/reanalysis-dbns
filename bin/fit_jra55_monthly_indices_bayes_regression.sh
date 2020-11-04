@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# Fit NNR1 monthly indices using linear Gaussian model.
+# Fit JRA-55 monthly indices using linear Gaussian model.
 
 PROJECT_DIR="${HOME}/projects/reanalysis-dbns"
 BIN_DIR="${PROJECT_DIR}/bin"
 RESULTS_DIR="${PROJECT_DIR}/results"
 
-REANALYSIS="nnr1"
+REANALYSIS="jra55"
 FREQUENCY="monthly"
 MODEL="bayes_regression"
 
