@@ -920,7 +920,7 @@ def structure_sample_chi2_convergence_diagnostics(sample_ds, max_nonzero=None,
 
     z, _ = _get_model_indicators(
         sample_ds, max_nonzero=max_nonzero,
-        only_sampled_models=False,
+        only_sampled_models=True,
         indicator_var=indicator_var)
 
     if batch:
@@ -938,7 +938,7 @@ def structure_sample_ks_convergence_diagnostics(sample_ds, max_nonzero=None,
 
     z, _ = _get_model_indicators(
         sample_ds, max_nonzero=max_nonzero,
-        only_sampled_models=False,
+        only_sampled_models=True,
         indicator_var=indicator_var)
 
     if batch:
