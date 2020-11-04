@@ -221,7 +221,8 @@ def main():
 
     D, R = sample_driver_response_system(
         args.alpha, args.gamma, args.tau,
-        n_samples=args.n_samples, n_realizations=1,
+        n_samples=args.n_samples,
+        n_realizations=n_realizations,
         warmup=warmup, random_state=random_seed)
 
     # Only use a single realization.
