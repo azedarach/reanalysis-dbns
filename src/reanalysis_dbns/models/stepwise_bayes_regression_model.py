@@ -16,6 +16,7 @@ import patsy
 import scipy.linalg as sl
 import scipy.special as sp
 import scipy.stats as ss
+import xarray as xr
 
 import reanalysis_dbns.utils as rdu
 
@@ -913,13 +914,19 @@ def structure_sample_convergence_rate(sample_ds, max_nonzero=None,
                                      combine_chains=combine_chains)
 
 
-def structure_sample_chi2_convergence_diagnostics(sample_ds, max_nonzero=None,
+def structure_sample_chi2_convergence_diagnostics(fit, max_nonzero=None,
                                                   indicator_var='k',
                                                   batch=True, **kwargs):
     """Calculate chi squared convergence diagnostics."""
 
+    if batch:
+        samples = xr.concat(
+            [fit.warmup_posterior, fit.posterior], dim='draw')
+    else:
+        samples = fit.posterior
+
     z, _ = _get_model_indicators(
-        sample_ds, max_nonzero=max_nonzero,
+        samples, max_nonzero=max_nonzero,
         only_sampled_models=True,
         indicator_var=indicator_var)
 
@@ -931,13 +938,19 @@ def structure_sample_chi2_convergence_diagnostics(sample_ds, max_nonzero=None,
         z, **kwargs)
 
 
-def structure_sample_ks_convergence_diagnostics(sample_ds, max_nonzero=None,
+def structure_sample_ks_convergence_diagnostics(fit, max_nonzero=None,
                                                 indicator_var='k',
                                                 batch=True, **kwargs):
     """Calculate chi squared convergence diagnostics."""
 
+    if batch:
+        samples = xr.concat(
+            [fit.warmup_posterior, fit.posterior], dim='draw')
+    else:
+        samples = fit.posterior
+
     z, _ = _get_model_indicators(
-        sample_ds, max_nonzero=max_nonzero,
+        samples, max_nonzero=max_nonzero,
         only_sampled_models=True,
         indicator_var=indicator_var)
 

@@ -228,62 +228,6 @@ def _standard_rhat(theta, split=True):
     return {'PSRF1': ordinary_rhat}
 
 
-def _get_model_indicators_to_keep(k, split=True):
-    """Get model indicator values to keep in convergence check."""
-
-    n_chains, n_iter = k.shape
-
-    if split:
-        # If calculating split diagnostics, treat the first half of
-        # each chain as a separate chain.
-        if n_iter % 2 == 0:
-            k = np.reshape(k, (2 * n_chains, n_iter // 2))
-        else:
-            k = np.reshape(k[:, 1:], (2 * n_chains, (n_iter - 1) // 2))
-    else:
-        # Otherwise, discard the first half of each chain.
-        n_warmup = int(n_iter // 2)
-
-        k = k[:, n_warmup:]
-
-    return k
-
-
-def _get_parameters_to_keep(theta, split=True):
-    """Get parameter samples to keep in convergence check."""
-    n_chains, n_iter, n_parameters = theta.shape
-
-    if split:
-        # If calculating split diagnostics, treat the first half of
-        # each chain as a separate chain.
-        if n_iter % 2 == 0:
-            theta = np.reshape(
-                theta, (2 * n_chains, n_iter // 2, n_parameters))
-        else:
-            theta = np.reshape(
-                theta[:, 1:, ...],
-                (2 * n_chains, (n_iter - 1) // 2, n_parameters))
-
-    else:
-        # Otherwise, discard the first half of each chain.
-        n_warmup = int(n_iter // 2)
-
-        theta = theta[:, n_warmup:, ...]
-
-    return theta
-
-
-def _get_samples_to_keep(k, theta=None, split=True):
-    """Get samples to keep in PSRF calculation."""
-
-    k = _get_model_indicators_to_keep(k, split=split)
-
-    if theta is not None:
-        theta = _get_parameters_to_keep(theta, split=split)
-
-    return k, theta
-
-
 def _calculate_variation_within_models(k, theta, model_indicators):
     """Calculate variation in parameters within models."""
 
@@ -346,6 +290,9 @@ def _calculate_variation_within_chains_and_models(k, theta, model_indicators):
 def rjmcmc_rhat(k, theta, model_indicators=None, split=True):
     """Calculate PSRF diagnostics for RJMCMC output.
 
+    Note, warmup samples are assumed to have already
+    been discarded.
+
     Parameters
     ----------
     k : array-like, shape (n_chains, n_iter)
@@ -388,9 +335,18 @@ def rjmcmc_rhat(k, theta, model_indicators=None, split=True):
     if n_models == 1:
         return _standard_rhat(theta, split=split)
 
-    # Get retained samples by either splitting chains or dropping
-    # first half of each chain.
-    k, theta = _get_samples_to_keep(k, theta, split=split)
+    if split:
+        # If calculating split diagnostics, treat the first half of
+        # each chain as a separate chain.
+        if n_iter % 2 == 0:
+            k = np.reshape(k, (2 * n_chains, n_iter // 2))
+            theta = np.reshape(
+                theta, (2 * n_chains, n_iter // 2, n_parameters))
+        else:
+            k = np.reshape(k[:, 1:], (2 * n_chains, (n_iter - 1) // 2))
+            theta = np.reshape(
+                theta[:, 1:, ...],
+                (2 * n_chains, (n_iter - 1) // 2, n_parameters))
 
     # Update values for number of chains and number of sweeps for use in
     # averages.
@@ -464,9 +420,6 @@ def rjmcmc_batch_rhat(k, theta, batch_size=None, model_indicators=None,
                       split=True):
     """Calculate batched PSRF diagnostics for RJMCMC output.
 
-    Note, warmup samples are assumed to have already
-    been discarded.
-
     Parameters
     ----------
     k : array-like, shape (n_chains, n_iter)
@@ -523,6 +476,12 @@ def rjmcmc_batch_rhat(k, theta, batch_size=None, model_indicators=None,
 
         k_batch = k[:, :batch_stop]
         theta_batch = theta[:, :batch_stop, ...]
+
+        # Discard first half of each chain in the batch.
+        n_warmup = int(batch_stop // 2)
+
+        k_batch = k[:, n_warmup:]
+        theta_batch = theta_batch[:, n_warmup:, ...]
 
         batch_rhat = rjmcmc_rhat(
             k_batch, theta_batch, model_indicators=model_indicators,
@@ -1190,6 +1149,9 @@ def rjmcmc_chisq_convergence(k, thin=1, sparse=False,
                              min_expected_count=5):
     """Calculate chi squared convergence diagnostic.
 
+    Note, warmup samples are assumed to have already been
+    discarded.
+
     Parameters
     ----------
     k : array-like, shape (n_chains, n_iter)
@@ -1232,13 +1194,15 @@ def rjmcmc_chisq_convergence(k, thin=1, sparse=False,
 
     k = check_array(k, dtype=None)
 
-    # Get retained samples by either splitting chains or dropping
-    # first half of each chain.
-    k = _get_model_indicators_to_keep(k, split=split)
+    n_chains, n_iter = k.shape
 
-    # Perform additional thinning of samples if necessary.
-    if thin > 1:
-        k = k[:, ::thin]
+    if split:
+        # If calculating split diagnostics, treat the first half of
+        # each chain as a separate chain.
+        if n_iter % 2 == 0:
+            k = np.reshape(k, (2 * n_chains, n_iter // 2))
+        else:
+            k = np.reshape(k[:, 1:], (2 * n_chains, (n_iter - 1) // 2))
 
     # Get number of models visited across all chains.
     visited_models = np.unique(k)
@@ -1287,9 +1251,6 @@ def rjmcmc_batch_chisq_convergence(k, batch_size=None,
                                    min_expected_count=5):
     """Calculate batched convergence diagnostics for RJMCMC output.
 
-    Note, warmup samples are assumed to have already
-    been discarded.
-
     Parameters
     ----------
     k : array-like, shape (n_chains, n_iter)
@@ -1312,6 +1273,10 @@ def rjmcmc_batch_chisq_convergence(k, batch_size=None,
 
     k = check_array(k, dtype=None)
 
+    # Perform additional thinning of samples if necessary.
+    if thin > 1:
+        k = k[:, ::thin]
+
     n_chains, n_iter = k.shape
 
     if batch_size is None:
@@ -1329,6 +1294,11 @@ def rjmcmc_batch_chisq_convergence(k, batch_size=None,
 
         k_batch = k[:, :batch_stop]
 
+        # Discard first half of each chain in the batch.
+        n_warmup = int(batch_stop // 2)
+
+        k_batch = k_batch[:, n_warmup:]
+
         samples[q - 1] = batch_stop
         test_statistics[q - 1], pvals[q - 1] = rjmcmc_chisq_convergence(
             k_batch, thin=thin, sparse=sparse, split=split,
@@ -1341,6 +1311,8 @@ def rjmcmc_batch_chisq_convergence(k, batch_size=None,
 
 def rjmcmc_kstest_convergence(k, split=True, thin=1, mode='auto'):
     """Calculate pairwise KS test based convergence diagnostic.
+
+    Note, warmup samples are assumed to already have been discarded.
 
     Parameters
     ----------
@@ -1381,13 +1353,15 @@ def rjmcmc_kstest_convergence(k, split=True, thin=1, mode='auto'):
 
     k = check_array(k, dtype=None)
 
-    # Get retained samples by either splitting chains or dropping
-    # first half of each chain.
-    k = _get_model_indicators_to_keep(k, split=split)
+    n_chains, n_iter = k.shape
 
-    # Perform additional thinning of samples if necessary.
-    if thin > 1:
-        k = k[:, ::thin]
+    if split:
+        # If calculating split diagnostics, treat the first half of
+        # each chain as a separate chain.
+        if n_iter % 2 == 0:
+            k = np.reshape(k, (2 * n_chains, n_iter // 2))
+        else:
+            k = np.reshape(k[:, 1:], (2 * n_chains, (n_iter - 1) // 2))
 
     # Update values for number of chains and number of sweeps for use in
     # averages.
@@ -1412,9 +1386,6 @@ def rjmcmc_batch_kstest_convergence(k, batch_size=None, thin=1,
                                     split=False, mode='auto'):
     """Calculate batched convergence diagnostics for RJMCMC output.
 
-    Note, warmup samples are assumed to have already
-    been discarded.
-
     Parameters
     ----------
     k : array-like, shape (n_chains, n_iter)
@@ -1437,6 +1408,10 @@ def rjmcmc_batch_kstest_convergence(k, batch_size=None, thin=1,
 
     k = check_array(k, dtype=None)
 
+    # Perform additional thinning of samples if necessary.
+    if thin > 1:
+        k = k[:, ::thin]
+
     n_chains, n_iter = k.shape
 
     if batch_size is None:
@@ -1457,6 +1432,11 @@ def rjmcmc_batch_kstest_convergence(k, batch_size=None, thin=1,
         batch_stop = min(n_iter, 2 * q * batch_size)
 
         k_batch = k[:, :batch_stop]
+
+        # Discard first half of each chain in the batch.
+        n_warmup = int(batch_stop // 2)
+
+        k_batch = k_batch[:, n_warmup:]
 
         samples[q - 1] = batch_stop
         test_statistics[q - 1], pvals[q - 1] = rjmcmc_kstest_convergence(

@@ -76,9 +76,6 @@ def test_rjmcmc_rhat_single_parameter_no_split():  # noqa: C901
 
     rhat_result = rdm.rjmcmc_rhat(k, theta, split=False)
 
-    k = k[:, 5:]
-    theta = theta[:, 5:]
-
     present_models = np.unique(k)
     n_models = np.size(present_models)
 
@@ -132,8 +129,6 @@ def test_rjmcmc_rhat_single_parameter_no_split():  # noqa: C901
     rhat_result = rdm.rjmcmc_rhat(k, theta, split=False)
 
     n_models = np.size(np.unique(k))
-    k = k[:, 5:]
-    theta = theta[:, 5:]
 
     theta_bar_cm = np.zeros((n_chains, n_models))
     theta_bar_c = np.zeros((n_chains,))
@@ -330,8 +325,8 @@ def test_rjmcmc_rhat_multiple_parameter_no_split():  # noqa: C901
 
     n_models = np.size(np.unique(initial_k))
 
-    k = initial_k[:, n_iter // 2:]
-    theta = initial_theta[:, n_iter // 2:, :]
+    k = initial_k
+    theta = initial_theta
 
     theta_bar_cm = np.zeros((n_chains, n_models, n_parameters))
     theta_bar_c = np.zeros((n_chains, n_parameters))
@@ -1490,9 +1485,9 @@ def test_rjmcmc_kstest_convergence():
     test_statistic, pval = rdm.rjmcmc_kstest_convergence(
         z_full, split=False)
 
-    t01, p01 = ss.ks_2samp(z[0], z[1], mode='auto')
-    t02, p02 = ss.ks_2samp(z[0], z[2], mode='auto')
-    t12, p12 = ss.ks_2samp(z[1], z[2], mode='auto')
+    t01, p01 = ss.ks_2samp(z_full[0], z_full[1], mode='auto')
+    t02, p02 = ss.ks_2samp(z_full[0], z_full[2], mode='auto')
+    t12, p12 = ss.ks_2samp(z_full[1], z_full[2], mode='auto')
 
     assert np.abs(test_statistic[0] - t01) < 1e-6
     assert np.abs(test_statistic[1] - t02) < 1e-6
