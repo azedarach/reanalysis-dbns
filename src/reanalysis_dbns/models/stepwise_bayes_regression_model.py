@@ -919,7 +919,7 @@ def structure_sample_chi2_convergence_diagnostics(fit, max_nonzero=None,
                                                   batch=True, **kwargs):
     """Calculate chi squared convergence diagnostics."""
 
-    if batch:
+    if batch and hasattr(fit, 'warmup_posterior'):
         samples = xr.concat(
             [fit.warmup_posterior, fit.posterior], dim='draw')
     else:
@@ -943,7 +943,7 @@ def structure_sample_ks_convergence_diagnostics(fit, max_nonzero=None,
                                                 batch=True, **kwargs):
     """Calculate chi squared convergence diagnostics."""
 
-    if batch:
+    if batch and hasattr(fit, 'warmup_posterior'):
         samples = xr.concat(
             [fit.warmup_posterior, fit.posterior], dim='draw')
     else:
