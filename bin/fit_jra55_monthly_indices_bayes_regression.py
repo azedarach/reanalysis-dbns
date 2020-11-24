@@ -87,8 +87,6 @@ FIT_PERIOD = [pd.Timestamp('1960-01-01'), pd.Timestamp('2005-11-30')]
 INDICES_TO_INCLUDE = ['AO', 'DMI', 'MEI', 'NHTELE1', 'NHTELE2', 'NHTELE3',
                       'NHTELE4', 'PNA', 'PSA1', 'PSA2', 'SAM', 'RMM1', 'RMM2']
 
-RANDOM_SEED = 0
-
 
 def get_nu_sq_value(a_tau, b_tau, R=4, q=0.99):
     """Calculate value of SNR hyperparameter."""
@@ -334,6 +332,8 @@ def parse_cmd_line_args():
                         type=int, default=None, help='restart number')
     parser.add_argument('--n-jobs', dest='n_jobs', type=int,
                         default=-1, help='number of jobs')
+    parser.add_argument('--random-seed', dest='random_seed', type=int,
+                        default=None, help='random seed')
 
     return parser.parse_args()
 
@@ -379,7 +379,7 @@ def main():
         thin = estimate_thinning_parameter(
             model_spec, a_tau, b_tau, nu_sq, data=data,
             n_chains=args.n_chains, max_terms=args.max_terms,
-            n_jobs=args.n_jobs, random_seed=RANDOM_SEED)
+            n_jobs=args.n_jobs, random_seed=0)
 
     # Then, run full fits.
     if args.restart_number is None or args.restart_number == 0:
@@ -399,7 +399,7 @@ def main():
         max_terms=args.max_terms, thin=thin,
         warmup=warmup,
         restart_file=restart_file,
-        n_jobs=args.n_jobs, random_seed=RANDOM_SEED)
+        n_jobs=args.n_jobs, random_seed=args.random_seed)
 
     output_file = get_fit_output_file(
         args.output_dir, args.outcome, args.max_lag, args.season,
