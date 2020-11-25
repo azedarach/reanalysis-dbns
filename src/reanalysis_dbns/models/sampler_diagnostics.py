@@ -1018,134 +1018,95 @@ def estimate_stationary_distribution(k, model_indicators=None, sparse=False,
             'n_observed_models': n_observed_models, 'epsilon': epsilon}
 
 
-def _reorder_table_columns(x, new_order):
-    """Reorder columns in matrix."""
+def _get_expected_model_counts(k):
+    """Get expected counts for occurrences of models."""
 
-    if len(new_order) != x.shape[1]:
+    n_chains, n_iter = k.shape
+
+    visited_models = np.unique(k)
+    n_models = len(visited_models)
+
+    class_lookup = {z: j for j, z in enumerate(visited_models)}
+
+    observed_counts = np.zeros((n_models,), dtype=np.uint64)
+    for i in range(n_chains):
+        for t in range(n_iter):
+            model_index = class_lookup[k[i, t]]
+            observed_counts[model_index] += 1
+
+    return observed_counts / n_chains
+
+
+def _get_chisq_class_lookup(k, merge_cells=True, min_expected_count=5):
+    """Construct look-up table for mapping models to classes."""
+
+    n_chains, n_iter = k.shape
+
+    visited_models = np.unique(k)
+    n_models = len(visited_models)
+
+    class_lookup = {z: j for j, z in enumerate(visited_models)}
+    if not merge_cells:
+        return class_lookup
+
+    expected_counts = _get_expected_model_counts(k)
+
+    count_order = np.argsort(expected_counts)[::-1]
+
+    model_lookup = {j: [visited_models[count_order[j]]]
+                    for j in range(n_models)}
+    expected_counts = expected_counts[count_order]
+
+    n_classes = len(model_lookup)
+
+    while n_classes > 1 and np.any(expected_counts < min_expected_count):
+
+        classes_to_merge = []
+        pos = n_classes - 1
+        merged_count = 0
+        while merged_count < min_expected_count and pos >= 0:
+            classes_to_merge.append(pos)
+            merged_count += expected_counts[pos]
+            pos -= 1
+
+        classes_to_merge = classes_to_merge[::-1]
+        n_classes_to_merge = len(classes_to_merge)
+
+        for i in range(n_classes_to_merge - 1, 0, -1):
+            model_lookup[classes_to_merge[0]] += \
+                model_lookup[classes_to_merge[i]]
+            del model_lookup[classes_to_merge[i]]
+
+            expected_counts[classes_to_merge[0]] += \
+                expected_counts[classes_to_merge[i]]
+
+        expected_counts = expected_counts[:-n_classes_to_merge + 1]
+
+        n_classes = len(model_lookup)
+
+        count_order = np.argsort(expected_counts)[::-1]
+
+        model_lookup = {j: model_lookup[count_order[j]]
+                        for j in range(n_classes)}
+        expected_counts = expected_counts[count_order]
+
+    if n_classes == 1 and np.any(expected_counts < min_expected_count):
         raise ValueError(
-            'Length of column permutation does not match number '
-            'of columns (got len(new_order)=%d but x.shape[1]=%d)' %
-            (len(new_order), x.shape[1]))
+            'Expected counts too small after merging all columns')
 
-    if sa.issparse(x):
-        new_x = x.tocoo()
+    class_lookup = {}
+    for j in model_lookup:
+        for z in model_lookup[j]:
+            class_lookup[z] = j
 
-        def _permute(i):
-            return np.nonzero(new_order == i)[0][0]
-
-        new_x.col = np.array([_permute(i) for i in new_x.col])
-
-        return _convert_to_sparse_format_like(new_x, x)
-
-    return x[:, new_order]
-
-
-def _merge_table_columns(x, cols_to_merge, dest):
-    """Merge given columns and place merged column at given index."""
-
-    if len(cols_to_merge) == 0:
-        return x
-
-    n_rows, n_init_cols = x.shape
-    n_cols_to_merge = len(cols_to_merge)
-    n_final_cols = n_init_cols - n_cols_to_merge + 1
-
-    if dest >= n_final_cols:
-        raise IndexError(
-            'Target column (%d) out of range' % dest)
-
-    unmerged_cols = np.array([d for d in range(n_init_cols)
-                              if d not in cols_to_merge])
-    unmerged_col_inds = np.array([d for d in range(n_final_cols)
-                                  if d != dest])
-
-    if len(unmerged_cols) == 0:
-        merged = x.sum(axis=1)
-        if merged.ndim == 1:
-            merged = np.reshape(merged, (n_rows, 1))
-        return merged
-
-    if sa.issparse(x):
-
-        merged = sa.dok_matrix((n_rows, n_final_cols), dtype=x.dtype)
-
-        nnz = x.nnz
-        nonzero_rows, nonzero_cols, nonzero_vals = sa.find(x)
-        for i in range(nnz):
-            if nonzero_cols[i] in cols_to_merge:
-                merged[nonzero_rows[i], dest] += nonzero_vals[i]
-            else:
-                new_col = unmerged_col_inds[
-                    np.nonzero(unmerged_cols == nonzero_cols[i])[0][0]]
-                merged[nonzero_rows[i], new_col] = nonzero_vals[i]
-
-        return _convert_to_sparse_format_like(merged, x)
-
-    merged = np.zeros((n_rows, n_final_cols), dtype=x.dtype)
-
-    merged[:, unmerged_col_inds] = x[:, unmerged_cols]
-    merged[:, dest] = np.sum(x[:, cols_to_merge], axis=1)
-
-    return merged
-
-
-def _merge_low_expected_frequency_cells(observed, min_expected_count=5):
-    """Merge table cells with expected counts below threshold."""
-
-    # Calculate initial set of expected column counts.
-    n_rows = observed.shape[0]
-    expected_counts = np.ravel(observed.sum(axis=0)) / n_rows
-
-    if not np.any(expected_counts < min_expected_count):
-        return observed
-
-    # Permute initial column ordering so that columns
-    # with smallest expected counts are left-most.
-    col_order = np.argsort(expected_counts)
-    merged = _reorder_table_columns(observed, col_order)
-    expected_counts = np.sort(expected_counts)
-
-    still_merging = True
-    n_cols = expected_counts.shape[0]
-    while still_merging and n_cols > 1:
-
-        # Combine all left-most columns until expected count is at least
-        # equal to minimum expected count.
-        cumulative_counts = np.cumsum(expected_counts)
-
-        cols_above_expected_count = np.where(
-            cumulative_counts >= min_expected_count)[0]
-
-        if np.size(cols_above_expected_count) == 0:
-            raise ValueError(
-                'Expected counts too small after merging all columns')
-
-        cols_to_merge = np.arange(cols_above_expected_count[0] + 1)
-
-        merged = _merge_table_columns(merged, cols_to_merge, 0)
-
-        # Find expected counts for each column and number of merged
-        # columns.
-        expected_counts = np.ravel(merged.sum(axis=0)) / n_rows
-        n_cols = expected_counts.shape[0]
-
-        # Permute columns so that columns with smallest expected
-        # counts are still left-most.
-        col_order = np.argsort(expected_counts)
-        merged = _reorder_table_columns(merged, col_order)
-        expected_counts = np.sort(expected_counts)
-
-        # Check if all columns have expected counts exceeding the
-        # minimum required.
-        still_merging = np.any(expected_counts < min_expected_count)
-
-    return merged
+    return class_lookup
 
 
 def rjmcmc_chisq_convergence(k, thin=1, sparse=False,
                              split=True, merge_cells=True,
                              correction=True,
                              use_likelihood_ratio=False,
+                             class_lookup=None,
                              min_expected_count=5):
     """Calculate chi squared convergence diagnostic.
 
@@ -1204,29 +1165,36 @@ def rjmcmc_chisq_convergence(k, thin=1, sparse=False,
         else:
             k = np.reshape(k[:, 1:], (2 * n_chains, (n_iter - 1) // 2))
 
+        # Update values for number of chains and number of sweeps for use in
+        # averages.
+        n_chains, n_iter = k.shape
+
     # Get number of models visited across all chains.
     visited_models = np.unique(k)
-    n_models = len(visited_models)
 
-    # Update values for number of chains and number of sweeps for use in
-    # averages.
-    n_chains, n_iter = k.shape
+    if class_lookup is None:
+        class_lookup = _get_chisq_class_lookup(
+            k, merge_cells=merge_cells,
+            min_expected_count=min_expected_count)
+
+    visited_classes = np.unique([class_lookup[z] for z in visited_models])
+    col_lookup = {z: j for j, z in enumerate(visited_classes)}
+
+    n_models = len(visited_models)
+    n_classes = len(col_lookup)
 
     # Construct contingency table of model occurrences within each
     # chain.
     if sparse:
-        observed_counts = sa.dok_matrix((n_chains, n_models), dtype=int)
+        observed_counts = sa.dok_matrix(
+            (n_chains, n_classes), dtype=np.uint64)
     else:
-        observed_counts = np.zeros((n_chains, n_models), dtype=int)
+        observed_counts = np.zeros((n_chains, n_classes), dtype=np.uint64)
 
     for i in range(n_chains):
-        for j, z in enumerate(visited_models):
-            observed_counts[i, j] = np.sum(k[i] == z)
-
-    if merge_cells:
-        # If required, merge cells with too small expected frequencies.
-        observed_counts = _merge_low_expected_frequency_cells(
-            observed_counts, min_expected_count=min_expected_count)
+        for t in range(n_iter):
+            class_index = class_lookup[k[i, t]]
+            observed_counts[i, col_lookup[class_index]] += 1
 
     if sparse:
         observed_counts = observed_counts.toarray()
@@ -1288,6 +1256,9 @@ def rjmcmc_batch_chisq_convergence(k, batch_size=None,
     pvals = np.zeros((n_batches,))
     samples = np.zeros((n_batches,), dtype=int)
 
+    class_lookup = _get_chisq_class_lookup(
+        k, merge_cells=merge_cells, min_expected_count=min_expected_count)
+
     for q in range(1, n_batches + 1):
 
         batch_stop = min(n_iter, 2 * q * batch_size)
@@ -1304,7 +1275,8 @@ def rjmcmc_batch_chisq_convergence(k, batch_size=None,
             k_batch, thin=thin, sparse=sparse, split=split,
             merge_cells=merge_cells, correction=correction,
             use_likelihood_ratio=use_likelihood_ratio,
-            min_expected_count=min_expected_count)
+            min_expected_count=min_expected_count,
+            class_lookup=class_lookup)
 
     return test_statistics, pvals, samples
 

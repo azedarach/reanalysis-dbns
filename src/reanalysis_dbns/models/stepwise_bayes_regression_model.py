@@ -866,7 +866,7 @@ def _get_model_lookup(sample_ds, indicator_var='k'):
 
     unique_k = _unique_models(sample_ds, indicator_var=indicator_var)
 
-    return {tuple(ki): '{:d}'.format(i)
+    return {tuple(ki): i
             for i, ki in enumerate(unique_k)}
 
 
@@ -879,7 +879,7 @@ def _get_model_indicators(sample_ds, only_sampled_models=True,
     n_chains = sample_ds.sizes['chain']
     n_draws = sample_ds.sizes['draw']
 
-    z = np.empty((n_chains, n_draws), dtype=str)
+    z = np.empty((n_chains, n_draws), dtype=np.uint64)
 
     for i in range(n_chains):
 
@@ -893,9 +893,8 @@ def _get_model_indicators(sample_ds, only_sampled_models=True,
         n_observed_models = len(model_indicators)
         n_possible_models = _count_possible_models(
             sample_ds, max_nonzero=max_nonzero, indicator_var=indicator_var)
-        model_indicators += ['{:d}'.format(i)
-                             for i in range(n_observed_models,
-                                            n_possible_models)]
+        model_indicators += [i for i in range(n_observed_models,
+                                              n_possible_models)]
 
     return z, model_indicators
 

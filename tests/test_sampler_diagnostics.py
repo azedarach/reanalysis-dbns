@@ -18,10 +18,9 @@ import reanalysis_dbns.models as rdm
 
 from reanalysis_dbns.models.sampler_diagnostics import (
     _count_model_transitions, _estimate_dirichlet_shape_parameters,
-    _invert_digamma,
-    _merge_low_expected_frequency_cells, _merge_table_columns,
+    _get_chisq_class_lookup, _invert_digamma,
     _relabel_unobserved_markov_chain_states,
-    _reorder_table_columns, _sample_stationary_distributions)
+    _sample_stationary_distributions)
 
 
 def test_rjmcmc_rhat_single_model():
@@ -1146,248 +1145,103 @@ def test_estimate_convergence_rate():
     assert np.abs(rho - rho_expected) < 1e-5
 
 
-def test_reorder_table_columns():
-    """Test reordering table columns."""
+def test_get_chisq_class_lookup():
+    """Test getting look-up table for merged model classes."""
 
-    x = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
-    col_order = np.array([0, 1, 2])
-    reordered_x = _reorder_table_columns(x, col_order)
-    assert np.all(x == reordered_x)
+    k = np.array([[1, 2, 3],
+                  [4, 5, 6]])
 
-    col_order = np.array([0, 2, 1])
-    reordered_x = _reorder_table_columns(x, col_order)
-    expected = np.array([[1, 3, 2], [4, 6, 5], [7, 9, 8]])
+    class_lookup = _get_chisq_class_lookup(k, merge_cells=False)
+    expected_lookup = {z: j for j, z in enumerate(np.unique(k))}
 
-    assert np.all(reordered_x == expected)
+    assert len(class_lookup) == len(expected_lookup)
 
-    x = sa.dok_matrix((4, 4))
-    x[0, 0] = 1
-    x[0, 2] = 2
-    x[1, 1] = 3
-    x[1, 2] = 4
-    col_order = np.array([0, 2, 1, 3])
-    reordered_x = _reorder_table_columns(x, col_order)
+    for z in expected_lookup:
+        assert expected_lookup[z] == class_lookup[z]
 
-    expected = np.array([[1, 2, 0, 0],
-                         [0, 4, 3, 0],
-                         [0, 0, 0, 0],
-                         [0, 0, 0, 0]])
+    k = np.array([[1, 1, 2, 2, 1, 1],
+                  [1, 1, 1, 1, 1, 2],
+                  [2, 2, 1, 1, 2, 2]])
 
-    assert np.all(expected == reordered_x.toarray())
+    class_lookup = _get_chisq_class_lookup(k, merge_cells=False)
+    expected_lookup = {z: j for j, z in enumerate(np.unique(k))}
 
+    assert len(class_lookup) == len(expected_lookup)
 
-def test_merge_table_columns():
-    """Test merging table columns."""
+    for z in expected_lookup:
+        assert expected_lookup[z] == class_lookup[z]
 
-    x = np.array([[6, 10, 7],
-                  [8, 6, 9],
-                  [7, 10, 9]])
+    class_lookup = _get_chisq_class_lookup(k, merge_cells=True)
+    expected_lookup = {1: 0, 2: 0}
 
-    cols_to_merge = []
-    merged_x = _merge_table_columns(x, cols_to_merge, 0)
-    assert np.all(x == merged_x)
+    assert len(class_lookup) == len(expected_lookup)
 
-    cols_to_merge = [2]
-    merged_x = _merge_table_columns(x, cols_to_merge, 2)
-    assert np.all(merged_x == x)
+    for z in expected_lookup:
+        assert expected_lookup[z] == class_lookup[z]
 
-    cols_to_merge = [2]
-    merged_x = _merge_table_columns(x, cols_to_merge, 1)
-    expected = np.array([[6, 7, 10],
-                         [8, 9, 6],
-                         [7, 9, 10]])
-    assert np.all(merged_x == expected)
+    class_lookup = _get_chisq_class_lookup(
+        k, merge_cells=True, min_expected_count=2)
+    expected_lookup = {z: j for j, z in enumerate(np.unique(k))}
 
-    cols_to_merge = np.array([0, 1])
-    merged_x = _merge_table_columns(x, cols_to_merge, 0)
-    expected = np.array([[16, 7],
-                         [14, 9],
-                         [17, 9]])
-    assert np.all(merged_x == expected)
+    assert len(class_lookup) == len(expected_lookup)
 
-    cols_to_merge = np.array([0, 1])
-    merged_x = _merge_table_columns(x, cols_to_merge, 1)
-    expected = np.array([[7, 16],
-                         [9, 14],
-                         [9, 17]])
-    assert np.all(merged_x == expected)
+    for z in expected_lookup:
+        assert expected_lookup[z] == class_lookup[z]
 
-    cols_to_merge = np.array([1, 2])
-    merged_x = _merge_table_columns(x, cols_to_merge, 1)
-    expected = np.array([[6, 17],
-                         [8, 15],
-                         [7, 19]])
-    assert np.all(merged_x == expected)
+    k = np.array([[1, 1, 2, 2, 1, 1, 1, 1, -1],
+                  [1, 1, 1, 1, 1, 2, 1, 1, 1],
+                  [2, 2, 1, 1, 2, 2, -1, 1, 1]])
 
-    cols_to_merge = np.array([1, 2])
-    merged_x = _merge_table_columns(x, cols_to_merge, 0)
-    expected = np.array([[17, 6],
-                         [15, 8],
-                         [19, 7]])
-    assert np.all(merged_x == expected)
+    class_lookup = _get_chisq_class_lookup(k, merge_cells=False)
+    expected_lookup = {z: j for j, z in enumerate(np.unique(k))}
 
-    cols_to_merge = np.array([1, 2, 0])
-    merged_x = _merge_table_columns(x, cols_to_merge, 0)
-    expected = np.array([[23],
-                         [23],
-                         [26]])
-    assert np.all(merged_x == expected)
+    assert len(class_lookup) == len(expected_lookup)
 
-    x = sa.dok_matrix((4, 4))
-    x[0, 0] = 1
-    x[0, 2] = 2
-    x[1, 1] = 3
-    x[2, 3] = 4
-    x[3, 1] = 5
+    for z in expected_lookup:
+        assert expected_lookup[z] == class_lookup[z]
 
-    cols_to_merge = []
-    merged_x = _merge_table_columns(x, cols_to_merge, 0)
+    class_lookup = _get_chisq_class_lookup(
+        k, merge_cells=True, min_expected_count=3)
+    expected_lookup = {1: 0, 2: 1, -1: 1}
 
-    assert np.all(x.toarray() == merged_x.toarray())
+    assert len(class_lookup) == len(expected_lookup)
 
-    cols_to_merge = np.array([1])
-    merged_x = _merge_table_columns(x, cols_to_merge, 1)
-    assert np.all(merged_x.toarray() == x.toarray())
+    for z in expected_lookup:
+        assert expected_lookup[z] == class_lookup[z]
 
-    cols_to_merge = np.array([1])
-    merged_x = _merge_table_columns(x, cols_to_merge, 2)
-    expected = np.array([[1, 2, 0, 0],
-                         [0, 0, 3, 0],
-                         [0, 0, 0, 4],
-                         [0, 0, 5, 0]])
-    assert np.all(merged_x.toarray() == expected)
+    k = np.array([[1, 1, 2, 2, 1, 1, 1, 1, -1, 3, 3, 3],
+                  [1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 3, 2],
+                  [2, 2, 1, 1, 2, 2, -1, 1, 1, 1, 1, 1]])
 
-    cols_to_merge = np.array([0, 1])
-    merged_x = _merge_table_columns(x, cols_to_merge, 2)
-    expected = np.array([[2, 0, 1],
-                         [0, 0, 3],
-                         [0, 4, 0],
-                         [0, 0, 5]])
-    assert np.all(merged_x.toarray() == expected)
+    class_lookup = _get_chisq_class_lookup(k, merge_cells=False)
+    expected_lookup = {z: j for j, z in enumerate(np.unique(k))}
 
-    cols_to_merge = np.array([0, 1])
-    merged_x = _merge_table_columns(x, cols_to_merge, 0)
-    expected = np.array([[1, 2, 0],
-                         [3, 0, 0],
-                         [0, 0, 4],
-                         [5, 0, 0]])
-    assert np.all(merged_x.toarray() == expected)
+    assert len(class_lookup) == len(expected_lookup)
 
-    cols_to_merge = np.array([0, 2, 3])
-    merged_x = _merge_table_columns(x, cols_to_merge, 0)
-    expected = np.array([[3, 0],
-                         [0, 3],
-                         [4, 0],
-                         [0, 5]])
-    assert np.all(merged_x.toarray() == expected)
+    for z in expected_lookup:
+        assert expected_lookup[z] == class_lookup[z]
 
-    cols_to_merge = np.array([1, 2, 3])
-    merged_x = _merge_table_columns(x, cols_to_merge, 0)
-    expected = np.array([[2, 1],
-                         [3, 0],
-                         [4, 0],
-                         [5, 0]])
-    assert np.all(merged_x.toarray() == expected)
+    class_lookup = _get_chisq_class_lookup(
+        k, merge_cells=True, min_expected_count=4)
+    expected_lookup = {1: 0, 2: 1, -1: 1, 3: 1}
 
-    cols_to_merge = np.array([0, 1, 2, 3])
-    merged_x = _merge_table_columns(x, cols_to_merge, 0)
-    expected = np.array([[3],
-                         [3],
-                         [4],
-                         [5]])
-    assert np.all(merged_x == expected)
+    assert len(class_lookup) == len(expected_lookup)
 
+    for z in expected_lookup:
+        assert expected_lookup[z] == class_lookup[z]
 
-def test_merge_low_expected_frequency_cells():
-    """Test merging columns with low expected counts."""
+    k = np.array([[1, 2], [3, 4], [5, 6]])
+    class_lookup = _get_chisq_class_lookup(k, merge_cells=False)
+    expected_lookup = {z: j for j, z in enumerate(np.unique(k))}
 
-    x = np.array([[8, 10, 9],
-                  [7, 11, 15]])
-    merged_x = _merge_low_expected_frequency_cells(x)
-    assert np.all(merged_x == x)
+    assert len(class_lookup) == len(expected_lookup)
 
-    merged_x = _merge_low_expected_frequency_cells(
-        x, min_expected_count=10)
-    expected = np.array([[9, 18],
-                         [15, 18]])
-    assert np.all(merged_x == expected)
-
-    merged_x = _merge_low_expected_frequency_cells(
-        x, min_expected_count=20)
-    expected = np.array([[27],
-                         [33]])
-    assert np.all(merged_x == expected)
+    for z in expected_lookup:
+        assert expected_lookup[z] == class_lookup[z]
 
     with pytest.raises(ValueError):
-        merged_x = _merge_low_expected_frequency_cells(
-            x, min_expected_count=40)
-
-    x = np.array([[0, 6, 4, 10],
-                  [3, 7, 3, 8],
-                  [1, 9, 4, 8]])
-    merged_x = _merge_low_expected_frequency_cells(x)
-    expected = np.array([[4, 6, 10],
-                         [6, 7, 8],
-                         [5, 9, 8]])
-    assert np.all(merged_x == expected)
-
-    x = np.array([[0, 0, 4, 0, 10],
-                  [0, 0, 8, 0, 11],
-                  [0, 0, 4, 0, 12]])
-    merged_x = _merge_low_expected_frequency_cells(x)
-    expected = np.array([[4, 10],
-                         [8, 11],
-                         [4, 12]])
-    assert np.all(merged_x == expected)
-
-    x = sa.dok_matrix((4, 100), dtype=int)
-    x_sampled = np.array([[7, 10, 9],
-                          [6, 7, 10],
-                          [8, 7, 10],
-                          [5, 9, 9]])
-    for i in range(x_sampled.shape[0]):
-        for j in range(x_sampled.shape[1]):
-            x[i, j] = x_sampled[i, j]
-
-    merged_x = _merge_low_expected_frequency_cells(x)
-    assert np.all(merged_x.toarray() == x_sampled)
-
-    x = sa.dok_matrix((4, 100), dtype=int)
-    x_sampled = np.array([[7, 10, 9],
-                          [6, 7, 10],
-                          [8, 7, 10],
-                          [5, 9, 9]])
-    for i in range(x_sampled.shape[0]):
-        for j in range(x_sampled.shape[1]):
-            x[i, j] = x_sampled[i, j]
-
-    x[0, 50] = 1
-    x[1, 50] = 4
-    x[2, 50] = 4
-    x[3, 50] = 3
-    x[0, 67] = 5
-    x[1, 67] = 3
-    x[2, 67] = 4
-    x[3, 67] = 3
-
-    expected = np.array([[7, 6, 10, 9],
-                         [6, 7, 7, 10],
-                         [8, 8, 7, 10],
-                         [5, 6, 9, 9]])
-    assert np.all(merged_x.toarray() == x_sampled)
-
-    x = sa.dok_matrix((3, 100000), dtype=int)
-    x[0, 1897] = 6
-    x[1, 1897] = 2
-    x[2, 1897] = 1
-    x[0, 5987] = 6
-    merged_x = _merge_low_expected_frequency_cells(x)
-    expected = np.array([[12], [2], [1]])
-    assert np.all(merged_x == expected)
-
-    with pytest.raises(ValueError):
-        merged_x = _merge_low_expected_frequency_cells(
-            x, min_expected_count=10)
+        class_lookup = _get_chisq_class_lookup(
+            k, merge_cells=True, min_expected_count=4)
 
 
 def test_rjmcmc_chisq_convergence():
