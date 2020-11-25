@@ -1026,14 +1026,14 @@ def test_structure_sample_chi2_convergence_diagnostics():
 
     test_statistic, pval = \
         rdm.structure_sample_chi2_convergence_diagnostics(
-            posterior_samples.posterior, batch=False)
+            posterior_samples, batch=False)
 
     assert test_statistic >= 0.0
     assert 0.0 <= pval <= 1.0
 
     test_statistics, pvals, batch_sizes = \
         rdm.structure_sample_chi2_convergence_diagnostics(
-            posterior_samples.posterior, batch=True)
+            posterior_samples, batch=True)
 
     n_batches = batch_sizes.shape[0]
 
@@ -1080,14 +1080,14 @@ def test_structure_sample_ks_convergence_diagnostics():
 
     test_statistic, pval = \
         rdm.structure_sample_ks_convergence_diagnostics(
-            posterior_samples.posterior, batch=False)
+            posterior_samples, batch=False)
 
     assert np.all(test_statistic >= 0.0)
     assert (np.all(pval >= 0.0) and np.all(pval <= 1.0))
 
     test_statistics, pvals, batch_sizes = \
         rdm.structure_sample_ks_convergence_diagnostics(
-            posterior_samples.posterior, batch=True)
+            posterior_samples, batch=True)
 
     n_batches = batch_sizes.shape[0]
     n_comparisons = n_chains * (n_chains - 1) // 2
