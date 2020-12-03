@@ -937,6 +937,31 @@ def structure_sample_chi2_convergence_diagnostics(fit, max_nonzero=None,
         z, **kwargs)
 
 
+def structure_sample_marginal_chi2(fit, max_nonzero=None, batch=True,
+                                   indicator_var='k', **kwargs):
+    """Calculate convergence diagnostics for model averaged indicators."""
+
+    if batch and hasattr(fit, 'warmup_posterior'):
+        samples = xr.concat(
+            [fit.warmup_posterior, fit.posterior], dim='draw')
+    else:
+        samples = fit.posterior
+
+    term_names = samples.term.data
+
+    results = {}
+    for t in term_names:
+
+        z = samples[indicator_var].sel(term=t).astype(int).data
+
+        if batch:
+            results[t] = rjmcmc_batch_chisq_convergence(z, **kwargs)
+        else:
+            results[t] = rjmcmc_chisq_convergence(z, **kwargs)
+
+    return results
+
+
 def structure_sample_ks_convergence_diagnostics(fit, max_nonzero=None,
                                                 indicator_var='k',
                                                 batch=True, **kwargs):
@@ -959,6 +984,31 @@ def structure_sample_ks_convergence_diagnostics(fit, max_nonzero=None,
 
     return rjmcmc_kstest_convergence(
         z, **kwargs)
+
+
+def structure_sample_marginal_ks(fit, max_nonzero=None, batch=True,
+                                 indicator_var='k', **kwargs):
+    """Calculate convergence diagnostics for model averaged indicators."""
+
+    if batch and hasattr(fit, 'warmup_posterior'):
+        samples = xr.concat(
+            [fit.warmup_posterior, fit.posterior], dim='draw')
+    else:
+        samples = fit.posterior
+
+    term_names = samples.term.data
+
+    results = {}
+    for t in term_names:
+
+        z = samples[indicator_var].sel(term=t).astype(int).data
+
+        if batch:
+            results[t] = rjmcmc_batch_kstest_convergence(z, **kwargs)
+        else:
+            results[t] = rjmcmc_kstest_convergence(z, **kwargs)
+
+    return results
 
 
 def structure_sample_diagnostics(sample_ds, max_nonzero=None,

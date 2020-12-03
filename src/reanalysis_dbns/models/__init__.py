@@ -29,6 +29,8 @@ from .stepwise_bayes_regression_model import (
     structure_sample_diagnostics,
     structure_sample_chi2_convergence_diagnostics,
     structure_sample_convergence_rate,
+    structure_sample_marginal_chi2,
+    structure_sample_marginal_ks,
     structure_sample_ks_convergence_diagnostics)
 from .stepwise_mc3_sampler import (initialize_stepwise_mc3,
                                    optimize_stepwise_mc3,
@@ -60,6 +62,8 @@ __all__ = [
     'structure_sample_diagnostics',
     'structure_sample_chi2_convergence_diagnostics',
     'structure_sample_convergence_rate',
+    'structure_sample_marginal_chi2',
+    'structure_sample_marginal_ks',
     'structure_sample_ks_convergence_diagnostics',
     'write_stepwise_mc3_samples'
 ]
