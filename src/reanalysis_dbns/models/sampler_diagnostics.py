@@ -1180,7 +1180,6 @@ def rjmcmc_chisq_convergence(k, thin=1, sparse=False,
     visited_classes = np.unique([class_lookup[z] for z in visited_models])
     col_lookup = {z: j for j, z in enumerate(visited_classes)}
 
-    n_models = len(visited_models)
     n_classes = len(col_lookup)
 
     # Construct contingency table of model occurrences within each
