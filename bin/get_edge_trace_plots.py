@@ -15,7 +15,6 @@ import os
 
 import arviz as az
 import matplotlib as mpl
-import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -72,17 +71,17 @@ def get_model_fit_pattern(outcome=None, a_tau=1.0, b_tau=1.0, nu_sq=20.0,
         base_period[1].strftime('%Y%m%d'))
 
     outcome_str = outcome if outcome is not None else '[A-Za-z0-9]+'
-    prefix = '.+\.{}\.{}\.{}'.format(base_period_str, season, frequency)
-    suffix = '\.'.join(['stepwise_bayes_regression',
-                        'max_lag-{:d}'.format(max_lag),
-                        'max_terms-{:d}'.format(max_terms),
-                        'a_tau-{:.3f}'.format(a_tau),
-                        'b_tau-{:.3f}'.format(b_tau),
-                        'nu_sq-{:.3f}'.format(nu_sq),
-                        'thin-[0-9]+', '(' + outcome_str + ')',
-                        'posterior_samples'])
+    prefix = r'.+\.{}\.{}\.{}'.format(base_period_str, season, frequency)
+    suffix = r'\.'.join(['stepwise_bayes_regression',
+                         'max_lag-{:d}'.format(max_lag),
+                         'max_terms-{:d}'.format(max_terms),
+                         'a_tau-{:.3f}'.format(a_tau),
+                         'b_tau-{:.3f}'.format(b_tau),
+                         'nu_sq-{:.3f}'.format(nu_sq),
+                         'thin-[0-9]+', '(' + outcome_str + ')',
+                         'posterior_samples'])
 
-    return '\.'.join([prefix, suffix]) + '(\.restart-[0-9]+)?' + '\.nc'
+    return r'\.'.join([prefix, suffix]) + r'(\.restart-[0-9]+)?' + r'\.nc'
 
 
 def get_fit_output_files(models_dir, model_pattern):
@@ -117,8 +116,6 @@ def get_variables_and_lags(fit):
     summary = az.summary(fit.posterior, var_names=indicator_pattern,
                          filter_vars='regex')
 
-    indicators = np.array([i for i in summary.index])
-
     indicator_vars = np.array([re.match(indicator_pattern, i)[1]
                                for i in summary.index])
     indicator_lags = np.array([int(re.match(indicator_pattern, i)[2])
@@ -136,7 +133,6 @@ def calculate_chain_estimates(fit, batch_size=None):
 
     unique_vars, unique_lags = get_variables_and_lags(fit)
 
-    n_vars = unique_vars.shape[0]
     n_lags = unique_lags.shape[0]
 
     samples = xr.concat(
@@ -183,13 +179,11 @@ def calculate_combined_estimates(fit, batch_size=None):
 
     unique_vars, unique_lags = get_variables_and_lags(fit)
 
-    n_vars = unique_vars.shape[0]
     n_lags = unique_lags.shape[0]
 
     samples = xr.concat(
         [fit.warmup_posterior, fit.posterior], dim='draw')
 
-    n_chains = samples.sizes['chain']
     n_draws = samples.sizes['draw']
 
     if batch_size is None:
@@ -316,13 +310,16 @@ def plot_trace_plots(reanalysis, output_dir,
     plot_basename = os.path.basename(model_files[0]).replace('.nc', '')
     plot_basename = os.path.join(output_dir, plot_basename)
 
-    title_str = r'{} {} $a_\tau = {:.3f}$, $b_\tau = {:.3f}$, $\nu^2 = {:.3f}$'.format(
-        reanalysis.upper(), INDEX_NAMES[outcome], a_tau, b_tau, nu_sq)
+    title_str = \
+        r'{} {} $a_\tau = {:.3f}$, $b_\tau = {:.3f}$, $\nu^2 = {:.3f}$'.format(
+            reanalysis.upper(), INDEX_NAMES[outcome], a_tau, b_tau, nu_sq)
 
-    fig = plot_indicator_probability_trace(fit, batch_size=batch_size)
+    fig = plot_indicator_probability_trace(  # noqa: F841
+        fit, batch_size=batch_size)
 
     plot_filename = '.'.join(
-        [plot_basename, 'indicator_posterior_probability_trace_combined', 'pdf'])
+        [plot_basename, 'indicator_posterior_probability_trace_combined',
+         'pdf'])
 
     plt.suptitle(title_str, fontsize=24, y=0.95)
 

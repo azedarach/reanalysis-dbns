@@ -14,7 +14,6 @@ import re
 
 import arviz as az
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 import xarray as xr
 
@@ -35,17 +34,17 @@ def get_model_fit_pattern(outcome=None, a_tau=1.0, b_tau=1.0, nu_sq=20.0,
         base_period[1].strftime('%Y%m%d'))
 
     outcome_str = outcome if outcome is not None else '[A-Za-z0-9]+'
-    prefix = '.+\.{}\.{}\.{}'.format(base_period_str, season, frequency)
-    suffix = '\.'.join(['stepwise_bayes_regression',
-                        'max_lag-{:d}'.format(max_lag),
-                        'max_terms-{:d}'.format(max_terms),
-                        'a_tau-{:.3f}'.format(a_tau),
-                        'b_tau-{:.3f}'.format(b_tau),
-                        'nu_sq-{:.3f}'.format(nu_sq),
-                        'thin-[0-9]+', '(' + outcome_str + ')',
-                        'posterior_samples'])
+    prefix = r'.+\.{}\.{}\.{}'.format(base_period_str, season, frequency)
+    suffix = r'\.'.join(['stepwise_bayes_regression',
+                         'max_lag-{:d}'.format(max_lag),
+                         'max_terms-{:d}'.format(max_terms),
+                         'a_tau-{:.3f}'.format(a_tau),
+                         'b_tau-{:.3f}'.format(b_tau),
+                         'nu_sq-{:.3f}'.format(nu_sq),
+                         'thin-[0-9]+', '(' + outcome_str + ')',
+                         'posterior_samples'])
 
-    return '\.'.join([prefix, suffix]) + '(\.restart-[0-9]+)?' + '\.nc'
+    return r'\.'.join([prefix, suffix]) + r'(\.restart-[0-9]+)?' + r'\.nc'
 
 
 def get_fit_output_files(models_dir, model_pattern):
@@ -141,7 +140,7 @@ def plot_convergence_diagnostics(output_dir, outcome, model_files):
         _, ks_pvals, ks_samples = \
             rdm.structure_sample_ks_convergence_diagnostics(
                 fit, batch=True, split=False)
-    except:
+    except ValueError:
         return
 
     fig = plot_pval_diagnostics(chi2_samples, chi2_pvals,
@@ -165,15 +164,16 @@ def plot_convergence_diagnostics(output_dir, outcome, model_files):
         _, ks_pvals, ks_samples = \
             rdm.structure_sample_ks_convergence_diagnostics(
                 fit, batch=True, split=True)
-    except:
+    except ValueError:
         return
 
-    fig = plot_pval_diagnostics(chi2_samples, chi2_pvals,
+    fig = plot_pval_diagnostics(chi2_samples, chi2_pvals,  # noqa: F841
                                 ks_samples, ks_pvals)
 
     plt.suptitle(outcome + ' (split)', fontsize=16)
 
-    output_file = '.'.join([plot_basename, 'split_convergence_diagnostics.pdf'])
+    output_file = '.'.join(
+        [plot_basename, 'split_convergence_diagnostics.pdf'])
     plt.savefig(output_file, bbox_inches='tight', facecolor='white')
     plt.savefig(output_file.replace('.pdf', '.png'),
                 bbox_inches='tight', facecolor='white')

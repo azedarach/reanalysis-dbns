@@ -32,17 +32,17 @@ def get_model_fit_pattern(outcome=None, a_tau=1.0, b_tau=1.0, nu_sq=20.0,
         base_period[1].strftime('%Y%m%d'))
 
     outcome_str = outcome if outcome is not None else '[A-Za-z0-9]+'
-    prefix = '.+\.{}\.{}\.{}'.format(base_period_str, season, frequency)
-    suffix = '\.'.join(['stepwise_bayes_regression',
-                        'max_lag-{:d}'.format(max_lag),
-                        'max_terms-{:d}'.format(max_terms),
-                        'a_tau-{:.3f}'.format(a_tau),
-                        'b_tau-{:.3f}'.format(b_tau),
-                        'nu_sq-{:.3f}'.format(nu_sq),
-                        'thin-[0-9]+', '(' + outcome_str + ')',
-                        'posterior_samples'])
+    prefix = r'.+\.{}\.{}\.{}'.format(base_period_str, season, frequency)
+    suffix = r'\.'.join(['stepwise_bayes_regression',
+                         'max_lag-{:d}'.format(max_lag),
+                         'max_terms-{:d}'.format(max_terms),
+                         'a_tau-{:.3f}'.format(a_tau),
+                         'b_tau-{:.3f}'.format(b_tau),
+                         'nu_sq-{:.3f}'.format(nu_sq),
+                         'thin-[0-9]+', '(' + outcome_str + ')',
+                         'posterior_samples'])
 
-    return '\.'.join([prefix, suffix]) + '(\.restart-[0-9]+)?' + '\.nc'
+    return r'\.'.join([prefix, suffix]) + r'(\.restart-[0-9]+)?' + r'\.nc'
 
 
 def get_fit_output_files(models_dir, model_pattern):

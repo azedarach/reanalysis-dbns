@@ -52,17 +52,17 @@ def get_model_fit_pattern(outcome=None, a_tau=1.0, b_tau=1.0, nu_sq=20.0,
         base_period[1].strftime('%Y%m%d'))
 
     outcome_str = outcome if outcome is not None else '[A-Za-z0-9]+'
-    prefix = '.+\.{}\.{}\.{}'.format(base_period_str, season, frequency)
-    suffix = '\.'.join(['stepwise_bayes_regression',
-                        'max_lag-{:d}'.format(max_lag),
-                        'max_terms-{:d}'.format(max_terms),
-                        'a_tau-{:.3f}'.format(a_tau),
-                        'b_tau-{:.3f}'.format(b_tau),
-                        'nu_sq-{:.3f}'.format(nu_sq),
-                        'thin-[0-9]+', '(' + outcome_str + ')',
-                        'posterior_samples'])
+    prefix = r'.+\.{}\.{}\.{}'.format(base_period_str, season, frequency)
+    suffix = r'\.'.join(['stepwise_bayes_regression',
+                         'max_lag-{:d}'.format(max_lag),
+                         'max_terms-{:d}'.format(max_terms),
+                         'a_tau-{:.3f}'.format(a_tau),
+                         'b_tau-{:.3f}'.format(b_tau),
+                         'nu_sq-{:.3f}'.format(nu_sq),
+                         'thin-[0-9]+', '(' + outcome_str + ')',
+                         'posterior_samples'])
 
-    return '\.'.join([prefix, suffix]) + '(\.restart-[0-9]+)?' + '\.nc'
+    return r'\.'.join([prefix, suffix]) + r'(\.restart-[0-9]+)?' + r'\.nc'
 
 
 def get_fit_output_files(models_dir, model_pattern):
@@ -100,8 +100,6 @@ def get_variables_and_lags(fit):
     summary = az.summary(fit.posterior, var_names=indicator_pattern,
                          filter_vars='regex')
 
-    indicators = np.array([i for i in summary.index])
-
     indicator_vars = np.array([re.match(indicator_pattern, i)[1]
                                for i in summary.index])
     indicator_lags = np.array([int(re.match(indicator_pattern, i)[2])
@@ -119,13 +117,11 @@ def calculate_edge_probability(fit, batch_size=None):
 
     unique_vars, unique_lags = get_variables_and_lags(fit)
 
-    n_vars = unique_vars.shape[0]
     n_lags = unique_lags.shape[0]
 
     samples = xr.concat(
         [fit.warmup_posterior, fit.posterior], dim='draw')
 
-    n_chains = samples.sizes['chain']
     n_draws = samples.sizes['draw']
 
     if batch_size is None:
@@ -165,7 +161,6 @@ def plot_pval_diagnostics(batch_sizes, estimates,
     term_pattern = re.compile(r'([a-zA-Z0-9]+)_lag_([0-9]+)')
 
     terms = [t for t in chi2_results]
-    n_terms = len(terms)
 
     predictors = np.array(
         sorted(np.unique([term_pattern.search(t)[1] for t in terms]),
@@ -256,10 +251,10 @@ def plot_convergence_diagnostics(output_dir, outcome, model_files):
         indicator_ks_results = \
             rdm.structure_sample_marginal_ks(
                 fit, batch=True, split=False)
-    except:
+    except ValueError:
         return
 
-    fig = plot_pval_diagnostics(
+    fig = plot_pval_diagnostics(  # noqa: F841
         batch_sizes, post_probs,
         indicator_chi2_results, indicator_ks_results)
 
@@ -282,10 +277,10 @@ def plot_convergence_diagnostics(output_dir, outcome, model_files):
         indicator_ks_results = \
             rdm.structure_sample_marginal_ks(
                 fit, batch=True, split=True)
-    except:
+    except ValueError:
         return
 
-    fig = plot_pval_diagnostics(
+    fig = plot_pval_diagnostics(  # noqa: F841
         batch_sizes, post_probs,
         indicator_chi2_results, indicator_ks_results)
 
