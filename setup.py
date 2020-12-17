@@ -31,7 +31,7 @@ tests_require = [
 
 setup(
     name='reanalysis_dbns',
-    version='0.0.1',
+    version='0.1.0',
     author='Dylan Harries',
     author_email='Dylan.Harries@csiro.au',
     description='Code accompanying DBN study of reanalyses',
